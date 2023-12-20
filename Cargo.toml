@@ -1,8 +1,19 @@
 [package]
-name = "tokenizer"
+name = "text-tokenizer"
 version = "0.4.1"
 authors = ["merl <merl.001.mia@gmail.com>"]
-edition = "2018"
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+
+repository = "https://github.com/merl-twin/text-tokenizer"
+homepage = "https://github.com/merl-twin/text-tokenizer"
+
+include = [
+    "**/*.rs",
+    "Cargo.toml",
+]
+
 
 [features]
 default = ["strings"]
