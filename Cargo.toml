@@ -5,6 +5,7 @@ authors = ["merl <merl.001.mia@gmail.com>"]
 edition = "2021"
 license = "MIT"
 readme = "README.md"
+description = "Custom text tokenizer"
 
 repository = "https://github.com/merl-twin/text-tokenizer"
 homepage = "https://github.com/merl-twin/text-tokenizer"
