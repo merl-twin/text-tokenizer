@@ -1,6 +1,6 @@
 [package]
 name = "text-tokenizer"
-version = "0.4.1"
+version = "0.5.0"
 authors = ["merl <merl.001.mia@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -22,7 +22,8 @@ default = ["strings"]
 strings = []
 
 [dependencies]
+text-parsing = "0.4"
 unicode-segmentation = "1.2"
-unicode_categories = "0.1"
-lazy_static = "1.1"
-regex = "1"
+unicode-properties = "0.1"
+lazy_static = "1.5"
+

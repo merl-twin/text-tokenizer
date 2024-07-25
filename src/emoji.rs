@@ -2629,7 +2629,10 @@ lazy_static::lazy_static! {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{IntoTokenizer, PositionalToken, Token};
+    use crate::{IntoTokenizer, Token};
+    use text_parsing::{
+        Snip,Localize,
+    };
 
     #[test]
     #[ignore]
@@ -2637,7 +2640,8 @@ mod test {
         let mut diff = Vec::new();
         for (s,e) in EMOJIMAP.iter() {
             let lib_res = s.into_tokens().collect::<Vec<_>>();
-            let res = vec![PositionalToken { offset: 0, length: s.len(), token: Token::Emoji(e) }];
+            let res = vec![Token::Emoji(e).localize(Snip{ offset: 0, length: s.chars().count() },
+                                                    Snip{ offset: 0, length: s.len() })];
             if res != lib_res {
                 diff.push((res,lib_res))
             }
