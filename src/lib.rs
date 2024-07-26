@@ -1,21 +1,31 @@
-use unicode_segmentation::{UnicodeSegmentation,UWordBounds};
-use unicode_properties::{
-    GeneralCategoryGroup,
-    UnicodeGeneralCategory,
-    GeneralCategory,
-};
-use std::str::FromStr;
-use std::collections::{VecDeque,BTreeSet};
-
 use text_parsing::{
     Breaker, Local, Snip,
     SourceEvent, Source,
-    Localize,
 };
 
 mod emoji;
-
 pub use emoji::EMOJIMAP;
+
+mod breakers;
+pub use breakers::{
+    SentenceBreaker, UnicodeSentenceBreaker,
+};
+
+mod wordbreaker;
+
+mod options;
+pub use options::{
+    IntoTokenizer,
+    TokenizerOptions,
+    TokenizerParams,
+};
+
+mod tokens;
+pub use tokens::Tokens;
+
+mod text_tokens;
+pub use text_tokens::TextTokens;
+use text_tokens::InnerBound;
 
 #[derive(Debug)]
 pub enum Error {
@@ -55,659 +65,71 @@ pub enum Formatter {
     Unknown,
 }
 
-#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
-pub enum BasicToken<'t> {
-    Alphanumeric(&'t str),
-    Number(&'t str),
-    Punctuation(&'t str),
-    Separator(&'t str),
-    Formatter(&'t str),
-    Mixed(&'t str),
+#[derive(Debug,Clone,PartialEq,PartialOrd)]
+pub enum Unicode {
+    String(String),
+    Formatter(Formatter),
 }
-/*impl<'t> BasicToken<'t> {
-    fn len(&self) -> usize {
-        match &self {
-            BasicToken::Alphanumeric(s) |
-            BasicToken::Number(s) |
-            BasicToken::Punctuation(s) |
-            BasicToken::Mixed(s) |
-            BasicToken::Formatter(s) |
-            BasicToken::Separator(s) => s.len(),
-        }
-    }
-}*/
 
 #[cfg(feature = "strings")]
 #[derive(Debug,Clone,PartialEq,PartialOrd)]
-pub enum Token {
+pub enum Word {
     Word(String),
     StrangeWord(String),
-    Hashtag(String),
-    Mention(String),
-    Punctuation(String),
     Numerical(Numerical),
     Number(Number),
     Emoji(&'static str),
-    Unicode(String),
-    Separator(Separator),
-    UnicodeFormatter(Formatter),
-    UnicodeModifier(char),
+}
+
+#[cfg(feature = "strings")]
+#[derive(Debug,Clone,PartialEq,PartialOrd)]
+pub enum Struct {
+    Hashtag(String),
+    Mention(String),
     Url(String),
+}
+
+#[cfg(feature = "strings")]
+#[derive(Debug,Clone,PartialEq,PartialOrd)]
+pub enum Special {
+    Punctuation(String),
+    Symbol(char),
+    Separator(Separator),
+}
+
+#[cfg(not(feature = "strings"))]
+#[derive(Debug,Clone,PartialEq,PartialOrd)]
+pub enum Word {
+    Word,
+    StrangeWord,       
+    Numerical(Numerical),
+    Number(Number),
+    Emoji(&'static str),
 }
 #[cfg(not(feature = "strings"))]
 #[derive(Debug,Clone,PartialEq,PartialOrd)]
-pub enum Token {
-    Word,
-    StrangeWord,
+pub enum Struct {
     Hashtag,
-    Mention,
-    Punctuation,
-    Numerical(Numerical),
-    Number(Number),
-    Emoji(&'static str),
-    Unicode(String),
-    Separator(Separator),
-    UnicodeFormatter(Formatter),
-    UnicodeModifier(char),
+    Mention, 
     Url(String),
 }
 
-//#[derive(Debug)]
-struct ExtWordBounds<'t> {
-    offset: usize,
-    char_offset: usize,
-    initial: &'t str,
-    bounds: UWordBounds<'t>,
-    buffer: VecDeque<Local<&'t str>>,
-    ext_spliters: BTreeSet<char>,
-    allow_complex: bool,
-    split_dot: bool,
-    split_underscore: bool,
-    split_colon: bool,
-}
-impl<'t> ExtWordBounds<'t> {
-    fn new<'a>(s: &'a str, options: &BTreeSet<TokenizerOptions>) -> ExtWordBounds<'a> {
-        ExtWordBounds {
-            offset: 0,
-            char_offset: 0,
-            initial: s,
-            bounds: s.split_word_bounds(),
-            buffer: VecDeque::new(),
-            //exceptions: ['\u{200d}'].iter().cloned().collect(),
-            ext_spliters: ['\u{200c}'].iter().cloned().collect(),
-            allow_complex: if options.contains(&TokenizerOptions::NoComplexTokens) { false } else { true },
-            split_dot: if options.contains(&TokenizerOptions::SplitDot) { true } else { false },
-            split_underscore: if options.contains(&TokenizerOptions::SplitUnderscore) { true } else { false },
-            split_colon: if options.contains(&TokenizerOptions::SplitColon) { true } else { false },
-        }
-    }
-}
-impl<'t> Iterator for ExtWordBounds<'t> {
-    type Item = Local<&'t str>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.buffer.len() > 0 { return self.buffer.pop_front(); }
-        match self.bounds.next() {
-            None => None,
-            Some(w) => {
-                let mut len = 0;
-                let mut char_len = 0;
-                let mut chs = w.chars().peekable();
-                let num = match f64::from_str(w) { Ok(_) => true, Err(_) => false };
-                while let Some(c) = chs.next() {
-                    let ln = c.len_utf8();
-                    let c_is_spliter = self.ext_spliters.contains(&c);
-                    let c_is_punctuation = c.general_category_group() == GeneralCategoryGroup::Punctuation;                    
-                    if  c_is_spliter //( c_is_other_format && !exceptions_contain_c )
-                        || ( (c == '\u{200d}') && chs.peek().is_none() ) 
-                        || ( c_is_punctuation && !num && !self.allow_complex ) // && !exceptions_contain_c 
-                        || ( (c == '.') && !num && self.split_dot )
-                        || ( (c == '_') && !num && self.split_underscore )
-                        || ( (c == ':') && self.split_colon )
-                    {
-                        if len > 0 {
-                            let local = ().localize(Snip{ offset: self.char_offset, length: char_len },
-                                                    Snip{ offset: self.offset, length: len });
-                            self.buffer.push_back(local.local(&self.initial[self.offset .. self.offset+len]));
-                            self.offset += len;
-                            self.char_offset += char_len;
-                            len = 0;
-                            char_len = 0;
-                        }                        
-                        let local = ().localize(Snip{ offset: self.char_offset, length: 1 },
-                                                Snip{ offset: self.offset, length: ln });
-                        self.buffer.push_back(local.local(&self.initial[self.offset .. self.offset+ln]));
-                        self.offset += ln;
-                        self.char_offset += 1;                        
-                    } else {
-                        len += ln;
-                        char_len += 1;
-                    }
-                }
-                if len > 0 {
-                    let local = ().localize(Snip{ offset: self.char_offset, length: char_len },
-                                            Snip{ offset: self.offset, length: len });
-                    self.buffer.push_back(local.local(&self.initial[self.offset .. self.offset+len]));
-                    self.offset += len;
-                    self.char_offset += char_len;
-                }
-                self.next()
-            },
-        }
-    }
+#[cfg(not(feature = "strings"))]
+#[derive(Debug,Clone,PartialEq,PartialOrd)]
+pub enum Special {
+    Punctuation,
+    Symbol(char),
+    Separator(Separator),
 }
 
-fn one_char_word(w: &str) -> Option<char> {
-    // returns Some(char) if len in char == 1, None otherwise
-    let mut cs = w.chars();
-    match (cs.next(),cs.next()) {
-        (Some(c),None) => Some(c),
-        _ => None,
-    }
+#[derive(Debug,Clone,PartialEq,PartialOrd)]
+pub enum Token {
+    Word(Word),
+    Struct(Struct),
+    Special(Special),
+    Unicode(Unicode),    
 }
 
-//#[derive(Debug)]
-struct WordBreaker<'t> {
-    initial: &'t str,
-    prev_is_separator: bool,
-    bounds: std::iter::Peekable<ExtWordBounds<'t>>,
-}
-impl<'t> WordBreaker<'t> {
-    fn new<'a>(s: &'a str, options: &BTreeSet<TokenizerOptions>) -> WordBreaker<'a> {
-        WordBreaker {
-            initial: s,
-            prev_is_separator: true,
-            bounds: ExtWordBounds::new(s,options).peekable(),
-        }
-    }
-    fn next_token(&mut self) -> Option<Local<BasicToken<'t>>> {
-        match self.bounds.next() {
-            Some(w) => {
-                let (local,w) = w.into_inner();
-                if let Some(c) = one_char_word(w) {
-                    if ((c == '+')||(c == '-')) && self.prev_is_separator {
-                        if let Some(w2) = self.bounds.peek() {
-                            let (loc2,w2) = w2.into_inner();
-                            let mut num = true;  
-                            let mut dot_count = 0;
-                            for c in w2.chars() {
-                                num = num && (c.is_digit(10) || (c == '.'));
-                                if c == '.' { dot_count += 1; }
-                            }
-                            if dot_count>1 { num = false; }
-
-                            if num {
-                                if let Ok(local) = Local::from_segment(local,loc2) {
-                                    self.bounds.next();
-                                    let Snip{ offset: off, length: len } = local.bytes();
-                                    let p = &self.initial[off .. off+len];
-                                    return Some(local.local(BasicToken::Number(p)));
-                                }
-                            }
-                        }                                          
-                    }
-                    if c.is_ascii_punctuation() ||
-                        (c.general_category_group() == GeneralCategoryGroup::Punctuation) ||
-                        c.is_whitespace() ||
-                        (c.general_category() == GeneralCategory::Format)
-                    {
-                        let mut local = local;
-                        loop {
-                            match self.bounds.peek() {
-                                Some(p) if *p.data() == w => {
-                                    let (loc2,_) = p.into_inner();
-                                    match Local::from_segment(local,loc2) {
-                                        Ok(new_loc) => local = new_loc,
-                                        Err(_) => break,
-                                    }
-                                },
-                                _ => break,
-                            }
-                            self.bounds.next();
-                        }
-                        let Snip{ offset: off, length: len } = local.bytes();
-                        let p = &self.initial[off .. off+len];
-                        
-                        if c.is_ascii_punctuation() || (c.general_category_group() == GeneralCategoryGroup::Punctuation) {
-                            return Some(local.local(BasicToken::Punctuation(p)));
-                        }
-                        if c.general_category() == GeneralCategory::Format {
-                            return Some(local.local(BasicToken::Formatter(p)));
-                        } else {
-                            return Some(local.local(BasicToken::Separator(p)));
-                        }
-                    }
-                } // if c is one_char_word
-                let mut an = true;
-                let mut num = true;
-                let mut dot_count = 0;
-                for c in w.chars() {
-                    an = an && (c.is_alphanumeric() || (c == '.') || (c == '\'') || (c == '-') || (c == '+') || (c == '_'));
-                    num = num && (c.is_digit(10) || (c == '.') || (c == '-') || (c == '+'));
-                    if c == '.' { dot_count += 1; }
-                }
-                if dot_count>1 { num = false; }
-                if num {
-                    return Some(local.local(BasicToken::Number(w)));
-                }
-                if an {
-                    return Some(local.local(BasicToken::Alphanumeric(w)));
-                }
-                Some(local.local(BasicToken::Mixed(w)))
-            },
-            None => None,
-        }
-    }
-}
-impl<'t> Iterator for WordBreaker<'t> {
-    type Item = Local<BasicToken<'t>>;
-    fn next(&mut self) -> Option<Self::Item> {
-        let tok = self.next_token();
-        self.prev_is_separator = match &tok {
-            Some(tok) => match tok.data() {
-                BasicToken::Separator(..) => true,
-                _ => false,
-            },
-            _ => false,
-        };
-        tok
-    }
-}
-
-
-//#[derive(Debug)]
-pub struct Tokens<'t> {
-    bounds: WordBreaker<'t>,
-    buffer: VecDeque<Local<BasicToken<'t>>>,
-    allow_structs: bool,
-}
-impl<'t> Tokens<'t> {
-    fn new<'a>(s: &'a str, options: &BTreeSet<TokenizerOptions>) -> Tokens<'a> {
-        Tokens {
-            bounds: WordBreaker::new(s, &options),
-            buffer: VecDeque::new(),
-            allow_structs: if options.contains(&TokenizerOptions::StructTokens) { true } else { false },
-        }
-    }
-    fn basic_separator_to_pt(&mut self, s: &str) -> Token {
-        Token::Separator(match s.chars().next() {
-            Some(' ') => Separator::Space,
-            Some('\n') => Separator::Newline,
-            Some('\t') => Separator::Tab,
-            Some(c) => Separator::Char(c),
-            None => Separator::Unknown,
-        })
-    }
-    fn basic_formater_to_pt(&mut self, s: &str) -> Token {
-        Token::UnicodeFormatter(match s.chars().next() {
-            Some('\u{200d}') => Formatter::Joiner,
-            Some(c) => Formatter::Char(c),
-            None => Formatter::Unknown,
-        })
-    }   
-    fn basic_number_to_pt(&mut self, s: &str) -> Token {
-        match i64::from_str(s) {
-            Ok(n) => Token::Number(Number::Integer(n)),
-            Err(_) => {
-                match f64::from_str(s) {
-                    Ok(n) => Token::Number(Number::Float(n)),
-                    Err(..) => {
-                        #[cfg(feature = "strings")]
-                        { Token::Word(s.to_string()) }
-                        #[cfg(not(feature = "strings"))]
-                        { Token::Word }  
-                    },
-                }
-            }
-        }
-    }
-    fn basic_mixed_to_pt(&mut self, s: &str) -> Token {
-        let mut word = true;
-        let mut has_word_parts = false;
-        let mut first = true;
-        let mut same = false;
-        let mut one_c = ' ';
-        for c in s.chars() {
-            match c.is_alphanumeric() || c.is_digit(10) || (c.general_category_group() == GeneralCategoryGroup::Punctuation) || (c == '\u{0060}') {
-                true => { has_word_parts = true; },
-                false => { word = false; },
-            }
-            match first {
-                true => { one_c = c; first = false; same = true; },
-                false => if one_c != c { same = false; }
-            }
-        }
-        if !first && same && (one_c.is_whitespace() || (one_c.general_category() == GeneralCategory::Format)) {
-            if one_c.is_whitespace() {
-                return self.basic_separator_to_pt(s);                       
-            } else {
-                return self.basic_formater_to_pt(s)
-            }
-        }
-        if word {
-            #[cfg(feature = "strings")]
-            { Token::StrangeWord(s.to_string()) }
-            #[cfg(not(feature = "strings"))]
-            { Token::StrangeWord }  
-        } else {
-            let rs = s.replace("\u{fe0f}","");
-            match EMOJIMAP.get(&rs as &str) {
-                Some(em) => Token::Emoji(em),
-                None => match one_char_word(&rs) {
-                    Some(c) if c.general_category() == GeneralCategory::ModifierSymbol => Token::UnicodeModifier(c),
-                    Some(_) | None => match has_word_parts {
-                        true => {
-                            #[cfg(feature = "strings")]
-                            { Token::StrangeWord(s.to_string()) }
-                            #[cfg(not(feature = "strings"))]
-                            { Token::StrangeWord }  
-                        },
-                        false => Token::Unicode({
-                            let mut us = "".to_string();
-                            for c in rs.chars() {
-                                if us!="" { us += "_"; }
-                                us += "u";
-                                let ns = format!("{}",c.escape_unicode());
-                                us += &ns[3 .. ns.len()-1];
-                            }
-                            us
-                        }),
-                    }
-                },
-            }
-        }        
-    }
-    fn basic_alphanumeric_to_pt(&mut self, s: &str) -> Token {
-        /*
-        Word
-        StrangeWord
-        pub enum Numerical {
-            Date(String),
-            Ip(String),
-            DotSeparated(String),
-            Countable(String),
-            Measures(String),
-            Alphanumeric(String),
-        }*/
-        //let mut wrd = true;
-        let mut digits = false;
-        let mut digits_begin_only = false;
-        let mut dots = false;
-        let mut alphas_and_apos = false;
-        let mut other = false;
-
-        let mut start_digit = true;
-        for c in s.chars() {
-            if start_digit && (!c.is_digit(10)) { start_digit = false; }
-            match c {
-                c @ _ if c.is_digit(10) => {
-                    digits = true;
-                    if start_digit { digits_begin_only = true; }
-                    else { digits_begin_only = false; }
-                },
-                c @ _ if c.is_alphabetic() => { alphas_and_apos = true; },
-                '\'' => { alphas_and_apos = true; },
-                '.' => { dots = true; },
-                _ => { other = true; },
-            }
-        }
-        match (digits,digits_begin_only,dots,alphas_and_apos,other) {
-            (true,false,true,false,false) => {
-                // TODO: Date, Ip, DotSeparated
-                Token::Numerical(Numerical::DotSeparated(s.to_string()))
-            },
-            (true,true,_,true,false) => {
-                // TODO: Countable or Measures
-                Token::Numerical(Numerical::Measures(s.to_string()))
-            },
-            (true, _, _, _, _) => {
-                // Numerical trash, ids, etc.
-                Token::Numerical(Numerical::Alphanumeric(s.to_string()))
-            }
-            (false,false,_,true,false) => {
-                // Word
-                #[cfg(feature = "strings")]
-                { Token::Word(s.to_string()) }
-                #[cfg(not(feature = "strings"))]
-                { Token::Word }  
-            },
-            (false,false,_,_,_) => {
-                // Strange                    
-                #[cfg(feature = "strings")]
-                { Token::StrangeWord(s.to_string()) }
-                #[cfg(not(feature = "strings"))]
-                { Token::StrangeWord }   
-            },
-            (false,true,_,_,_) => unreachable!(),
-        }
-    }
-    fn basic_punctuation_to_pt(&mut self, s: &str) -> Token {
-        #[cfg(feature = "strings")]
-        { Token::Punctuation(s.to_string()) }
-        #[cfg(not(feature = "strings"))]
-        { Token::Punctuation }
-    }
-    /*fn check_url(&mut self) -> Option<PositionalToken> {
-        if !self.allow_structs { return None; }
-        let check = if self.buffer.len()>3 {
-            match (&self.buffer[0],&self.buffer[1],&self.buffer[2]) {
-                (BasicToken::Alphanumeric("http"),BasicToken::Punctuation(":"),BasicToken::Punctuation("//")) |
-                (BasicToken::Alphanumeric("https"),BasicToken::Punctuation(":"),BasicToken::Punctuation("//")) => true,
-                _ => false,
-            }
-        } else { false };
-        if check {
-            let mut url = "".to_string();
-            let tag_bound = None;
-            loop {
-                if let Some(b) = tag_bound {
-                    if (self.offset + url.len()) >= b { break; }
-                }
-                match self.buffer.pop_front() {
-                    None => break,
-                    Some(BasicToken::Separator(s)) => {
-                        self.buffer.push_front(BasicToken::Separator(s));
-                        break;
-                    },
-                    Some(BasicToken::Alphanumeric(s)) |
-                    Some(BasicToken::Number(s)) |
-                    Some(BasicToken::Punctuation(s)) |
-                    Some(BasicToken::Formatter(s)) |
-                    Some(BasicToken::Mixed(s)) => {
-                        url += s;
-                    },
-                }
-            }
-            let len = url.len();
-            let tok = PositionalToken {
-                offset: self.offset,
-                length: len,
-                token: Token::Url(url),
-            };
-            self.offset += len;
-            Some(tok)
-        } else { None }
-    }*/
-    fn check_hashtag(&mut self) -> Option<Local<Token>> {
-        if !self.allow_structs || (self.buffer.len() < 2) { return None; }
-
-        let (loc1,s1) = self.buffer[0].into_inner();
-        let (loc2,s2) = self.buffer[1].into_inner();
-        match (s1,s2) {
-            (BasicToken::Punctuation("#"),BasicToken::Alphanumeric(s)) |
-            (BasicToken::Punctuation("#"),BasicToken::Number(s)) => match Local::from_segment(loc1,loc2) {
-                Ok(local) => {
-                    self.buffer.pop_front();
-                    self.buffer.pop_front();
-                    
-                    Some(local.local({
-                        #[cfg(feature = "strings")]
-                        { Token::Hashtag(s.to_string()) }
-                        #[cfg(not(feature = "strings"))]
-                        { Token::Hashtag }
-                    }))
-                },
-                Err(_) => None,                    
-            },
-            _ => None,
-        }
-    }
-    fn check_mention(&mut self) -> Option<Local<Token>> {
-        if !self.allow_structs || (self.buffer.len() < 2) { return None; }
-
-        let (loc1,s1) = self.buffer[0].into_inner();
-        let (loc2,s2) = self.buffer[1].into_inner();
-        match (s1,s2) {
-            (BasicToken::Punctuation("@"),BasicToken::Alphanumeric(s)) |
-            (BasicToken::Punctuation("@"),BasicToken::Number(s)) => match Local::from_segment(loc1,loc2) {
-                Ok(local) => {
-                    self.buffer.pop_front();
-                    self.buffer.pop_front();
-                    
-                    Some(local.local({
-                        #[cfg(feature = "strings")]
-                        { Token::Mention(s.to_string()) }
-                        #[cfg(not(feature = "strings"))]
-                        { Token::Mention }
-                    }))
-                },
-                Err(_) => None,                    
-            },
-            _ => None,
-        }
-    }
-    fn next_from_buffer(&mut self) -> Option<Local<Token>> {
-        //if let Some(t) = self.check_url() { return Some(t); }
-        if let Some(t) = self.check_hashtag() { return Some(t); }
-        if let Some(t) = self.check_mention() { return Some(t); }
-        match self.buffer.pop_front() {
-            Some(local_tok) => {
-                let (local,tok) = local_tok.into_inner();
-                Some(local.local(match tok {
-                    BasicToken::Alphanumeric(s) => self.basic_alphanumeric_to_pt(s),
-                    BasicToken::Number(s) => self.basic_number_to_pt(s),
-                    BasicToken::Punctuation(s) => self.basic_punctuation_to_pt(s),
-                    BasicToken::Mixed(s) => self.basic_mixed_to_pt(s),
-                    BasicToken::Separator(s) => self.basic_separator_to_pt(s),
-                    BasicToken::Formatter(s) => self.basic_formater_to_pt(s),
-                }))
-            },
-            None => None,
-        }
-    }
-
-    
-    fn next_token(&mut self) -> Option<Local<Token>> {
-        loop {
-            if self.buffer.len()>0 {                
-                return self.next_from_buffer();
-            } else {
-                loop {
-                    match self.bounds.next() {
-                        Some(local_bt) => {
-                            let sep = if let BasicToken::Separator(_) = local_bt.data() { true } else { false };
-                            self.buffer.push_back(local_bt);
-                            if sep {
-                                return self.next_token();
-                            }
-                        },
-                        None if self.buffer.len()>0 => return self.next_token(),
-                        None => return None,
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<'t> Iterator for Tokens<'t> {
-    type Item = Local<Token>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_token()
-    }
-}
-
-
-pub trait IntoTokenizer: Sized {
-    type IntoTokens;
-    fn into_tokens_with_options<S>(self, params: TokenizerParams<S>) -> Self::IntoTokens;
-    
-    fn into_tokens(self) -> Self::IntoTokens {
-        self.into_tokens_with_options({
-            TokenizerParams::default()
-                .add_option(TokenizerOptions::SplitDot)
-                .add_option(TokenizerOptions::SplitUnderscore)
-                .add_option(TokenizerOptions::SplitColon)
-        })
-    }
-    fn basic_tokens(self) -> Self::IntoTokens {
-        self.into_tokens_with_options({
-            TokenizerParams::default()
-                .add_option(TokenizerOptions::NoComplexTokens)
-        })
-    }
-    fn complex_tokens(self) -> Self::IntoTokens {
-        self.into_tokens_with_options({
-            TokenizerParams::default()
-                .add_option(TokenizerOptions::StructTokens)
-        })
-    }
-}
-
-impl<'t> IntoTokenizer for &'t str {
-    type IntoTokens = Tokens<'t>;
-    
-    fn into_tokens_with_options<S>(self, params: TokenizerParams<S>) -> Self::IntoTokens {
-        Tokens::new(self, &params.options)
-    }
-}
-
-
-#[derive(Debug,Copy,Clone,PartialEq,Eq,PartialOrd,Ord)]
-pub enum TokenizerOptions {
-    NoComplexTokens,
-    StructTokens,
-    SplitDot,
-    SplitUnderscore,
-    SplitColon,
-
-    WithStructure,
-}
-
-
-pub struct TokenizerParams<S> {
-    options: BTreeSet<TokenizerOptions>,
-    sentence_breaker: S,
-}
-impl Default for TokenizerParams<()> {
-    fn default() -> TokenizerParams<()> {
-        TokenizerParams {
-            options: BTreeSet::new(),
-            sentence_breaker: (),
-        }
-    }
-}
-impl<S> TokenizerParams<S> {
-    pub fn add_option(mut self, option: TokenizerOptions) -> TokenizerParams<S> {
-        self.options.insert(option);
-        self
-    }
-    /*pub fn with_default_sentences(mut self) -> Self {
-        self.options.insert(TokenizerOptions::WithStructure);
-        self
-    }
-    pub fn with_sentence_breaker<S: SentenceBreaker>(mut self, sb: S) -> Self {
-        self.
-    }*/
-}
-
-#[derive(Debug)]
-struct InnerBound {
-    bytes: Snip,
-    chars: Snip,
-    breaker: Breaker,
-    original: Option<Local<()>>,
-}
 
 #[derive(Debug)]
 pub struct Text {
@@ -757,13 +179,6 @@ impl Text {
         }        
         Ok(text)
     }
-    /*pub fn tokenizer<S>(&self, params: TokenizerParams<S>) -> Tokens<'_> {
-        Tokens {
-            text: self,
-            
-        }
-}*/
-
     pub fn token_text<'s>(&'s self, token: &TextToken) -> &'s str {
         let Snip { offset: begin, length: len } = token.locality.bytes();
         let end = begin + len;
@@ -781,145 +196,174 @@ pub enum Bound {
 #[derive(Debug,Clone,PartialEq)]
 pub struct TextToken {
     locality: Local<()>,
-    pub token: ExtToken,
-}
-impl TextToken {
-    fn into_original_token(self) -> Option<Local<Token>> {
-        match self.token {
-            ExtToken::Token(tok) => {
-                let (origin,tok) = tok.into_inner();
-                Some(origin.local(tok))
-            },
-            ExtToken::Breaker(_) | 
-            ExtToken::Bound(_) => None,
-        }        
-    } 
+    original: Option<Local<()>>,
+    pub token: Token2,
 }
 
-#[derive(Debug,Clone,PartialEq)]
+#[cfg(test)]
+impl TextToken {
+    fn into_original_token_1(self) -> Option<Local<Token>> {
+        match self.original {
+            Some(original) => self.token
+                .into_token()
+                .map(|t| original.local(t)),
+            None => None,
+        }
+    }
+}
+
+impl TextToken {
+    pub fn into_original_token(self) -> Option<Local<Token2>> {
+        self.original.map(|original| original.local(self.token))
+    }
+    pub fn original_str<'s>(&self, original: &'s str) -> Result<&'s str,OriginalError> {
+        match self.original {
+            Some(local) => {
+                let Snip{ offset: begin, length: len } = local.bytes();
+                let end = begin + len;
+                match original.get(begin .. end) {
+                    Some(s) => Ok(s),
+                    None => Err(OriginalError::InvalidSnip),
+                }
+            },
+            None => Err(OriginalError::NoOriginal),
+        }
+    }
+}
+
+/*pub trait TokenExt: Iterator<Item = TextToken> + Sized {
+    fn merge_separators(self) -> Merger<Self>;
+}
+
+impl<T> TokenExt for T where T: Iterator<Item = TextToken> {
+    fn merge_separators(self) -> Merger<Self> {
+        Merger {
+            tokens: self,
+        }
+    }
+}
+
+pub struct Merger<T>
+where T: Iterator<Item = TextToken>
+{
+    tokens: T,
+}
+impl<T> Iterator for Merger<T>
+where T: Iterator<Item = TextToken>
+{
+    type Item = TextToken;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.tokens.next()
+    }
+}*/
+
+
+#[derive(Debug)]
+pub enum OriginalError {
+    NoOriginal,
+    InvalidSnip,
+}
+
+/*#[derive(Debug,Clone,PartialEq)]
 pub enum ExtToken {
     Token(Local<Token>),
     Breaker(Local<Bound>),
     Bound(Bound),
+}*/
+
+#[derive(Debug,Clone,PartialEq,PartialOrd)]
+pub enum Token2 {
+    Word(Word),
+    Struct(Struct),
+    Special(Special),
+    Unicode(Unicode),
+
+    Bound(Bound),
 }
-
-pub struct TextTokens<'t> {
-    text: &'t Text,
-    bounds: std::slice::Iter<'t,InnerBound>,
-    current_offset: usize,
-    current_char_offset: usize,
-    current_tokens: Option<Tokens<'t>>,
-
-    options: BTreeSet<TokenizerOptions>,
-    next_offset: usize,
-    next_char_offset: usize,
-    next_bound: Option<TextToken>,
-}
-impl<'t> TextTokens<'t> {
-    fn new<S>(text: &Text, params: TokenizerParams<S>) -> TextTokens {
-        TextTokens {
-            text,
-            bounds: text.breakers.iter(),
-            current_offset: 0,
-            current_char_offset: 0,
-            current_tokens: None,
-            options: params.options,
-
-            next_offset: 0,
-            next_char_offset: 0,
-            next_bound: None,
+impl From<Token> for Token2 {
+    fn from(t: Token) -> Token2 {
+        match t {
+            Token::Word(w) => Token2::Word(w),
+            Token::Struct(s) => Token2::Struct(s),
+            Token::Special(s) => Token2::Special(s),
+            Token::Unicode(u) => Token2::Unicode(u),
         }
     }
 }
-impl<'t> Iterator for TextTokens<'t> {
-    type Item = TextToken;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match &mut self.current_tokens {
-                Some(tokens) => match tokens.next() {
-                    Some(local_token) => {
-                        let (local,token) = local_token.into_inner();
-                        let local = local.with_shift(self.current_char_offset, self.current_offset);
-                        let Snip { offset: first, length: len } = local.chars();
-                        if len > 0 {
-                            let last = first + len - 1;
-                            let original = match len == 1 {
-                                false => match Local::from_segment(self.text.originals[first],self.text.originals[last]) {
-                                    Ok(loc) => loc,
-                                    Err(_) => continue,
-                                },
-                                true => self.text.originals[first],                                
-                            };                            
-                            break Some(TextToken {
-                                locality: local,
-                                token: ExtToken::Token(original.local(token)),
-                            });
-                        }
-                    },
-                    None => {
-                        self.current_tokens = None;
-                        self.current_offset = self.next_offset;
-                        self.current_char_offset = self.next_char_offset;
-                        if let Some(tok) = self.next_bound.take() {
-                            break Some(tok);
-                        }
-                    },
-                },
-                None => {                    
-                    let (txt,next_offset,opt_bound) = match self.bounds.next() {
-                        Some(InnerBound{ bytes, chars, breaker, original }) => {
-                            if bytes.offset < self.current_offset { continue; }
-                            let txt = &self.text.buffer[self.current_offset .. bytes.offset];
-                            let next_offset = bytes.offset + bytes.length;
-                            let next_char_offset = chars.offset + chars.length;
-                            let opt_bound = match match breaker {
-                                Breaker::None | Breaker::Space | Breaker::Line | Breaker::Word => None,
-                                Breaker::Sentence => Some(Bound::Sentence),
-                                Breaker::Paragraph => Some(Bound::Paragraph),
-                                Breaker::Section => Some(Bound::Section),
-                            } {
-                                Some(bound) => Some(TextToken {
-                                    locality: ().localize(*chars,*bytes),
-                                    token: match original {
-                                        Some(orig) => ExtToken::Breaker(orig.local(bound)),
-                                        None => ExtToken::Bound(bound),
-                                    }
-                                }),
-                                None => None,
-                            };
-                            (txt,(next_offset,next_char_offset),opt_bound)
-                        },
-                        None => match self.current_offset < self.text.buffer.len() {
-                            true => {
-                                let txt = &self.text.buffer[self.current_offset .. ];
-                                let next_offset = self.text.buffer.len();
-                                let next_char_offset = self.text.originals.len();
-                                let opt_bound = None;
-                                (txt,(next_offset,next_char_offset),opt_bound)
-                            },
-                            false => break None,
-                        },
-                    };
-                    self.next_offset = next_offset.0;
-                    self.next_char_offset = next_offset.1;
-                    self.next_bound = opt_bound;
-                    self.current_tokens = Some(Tokens::new(txt,&self.options));
-                },
-            }
+#[cfg(test)]
+impl Token2 {
+    fn into_token(self) -> Option<Token> {
+        match self {
+            Token2::Word(w) => Some(Token::Word(w)),
+            Token2::Struct(s) => Some(Token::Struct(s)),
+            Token2::Special(s) => Some(Token::Special(s)),
+            Token2::Unicode(u) => Some(Token::Unicode(u)),
+            Token2::Bound(_) => None
         }
     }
 }
 
-impl<'t> IntoTokenizer for &'t Text {
-    type IntoTokens = TextTokens<'t>;
 
-    fn into_tokens_with_options<S>(self, params: TokenizerParams<S>) -> Self::IntoTokens {
-        TextTokens::new(self, params)
+
+#[cfg(test)]
+mod test_v0_5 {
+    use super::*;
+    use text_parsing::{
+        IntoSource,
+        IntoPipeParser,
+        ParserExt,SourceExt,
+        tagger,
+        entities,
+    };
+
+    //#[test]
+    fn basic() {
+        /*let uws = "Oxana Putan shared the quick (\"brown\") fox can't jump 32.3 feet, right?4pda etc. qeq U.S.A  asd\n\n\nBrr, it's 29.3°F!\n Русское предложение #36.6 для тестирования деления по юникод-словам...\n🇷🇺 🇸🇹\n👱🏿👶🏽👨🏽\n+Done! Готово";
+        
+        /*let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word("l'oreal".to_string()) },
+            PositionalToken { source: uws, offset: 7, length: 1, token: Token::Punctuation(";".to_string()) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Separator(Separator::Space) },
+            PositionalToken { source: uws, offset: 9, length: 7, token: Token::Word("l'oreal".to_string()) },
+        ];*/
+        let text = Text::new({
+            uws.into_source()
+                .into_separator()
+                .merge_separators()
+        }).unwrap();*/
+
+        let uws = "<p>Oxana Putan shared the quick (\"brown\") fox can't jump 32.3 feet, right? 4pda etc.</p><p> qeq U.S.A  asd\n\n\nBrr, it's 29.3°F!\n Русское предложение #36.6 для тестирования деления по юникод-словам...\n🇷🇺 🇸🇹\n👱🏿👶🏽👨🏽\n+Done! Готово</p>";
+        let text = Text::new({
+            uws.into_source()
+                .pipe({
+                    tagger::Builder::new()                      
+                        .create()
+                        .into_breaker()
+                })
+                .pipe(entities::Builder::new().create().into_piped())
+                .into_separator()
+        }).unwrap();
+        let lib_res = text
+            .into_tokenizer({
+                TokenizerParams::default()
+                    .add_option(TokenizerOptions::SplitDot)
+                    .add_option(TokenizerOptions::SplitUnderscore)
+                    .add_option(TokenizerOptions::SplitColon)
+                    .with_default_sentences()
+            })
+            .collect::<Vec<_>>();
+        
+        for tok in lib_res {
+            println!("C{:?}, B{:?}, {:?} -> {:?}",
+                     tok.original.map(|loc|loc.chars()),
+                     tok.original.map(|loc|loc.bytes()),
+                     tok.token,
+                     tok.original_str(uws));
+        }
+            
+        panic!()
     }
 }
-
-
 
 #[cfg(test)]
 mod test {
@@ -928,6 +372,7 @@ mod test {
         IntoSource,
         IntoPipeParser,
         ParserExt,SourceExt,
+        Localize,
         tagger,
         entities,
     };
@@ -1077,46 +522,52 @@ mod test {
     fn spaces() {
         let uws = "    spaces    too   many   apces   ";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 4, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word("spaces".to_string()) },
-            PositionalToken { source: uws, offset: 10, length: 4, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 14, length: 3, token: Token::Word("too".to_string()) },
-            PositionalToken { source: uws, offset: 17, length: 3, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 20, length: 4, token: Token::Word("many".to_string()) },
-            PositionalToken { source: uws, offset: 24, length: 3, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 27, length: 5, token: Token::Word("apces".to_string()) },
-            PositionalToken { source: uws, offset: 32, length: 3, token: Token::Separator(Separator::Space) },
+            PositionalToken { source: uws, offset: 0, length: 4, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Word("spaces".to_string())) },
+            PositionalToken { source: uws, offset: 10, length: 4, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 14, length: 3, token: Token::Word(Word::Word("too".to_string())) },
+            PositionalToken { source: uws, offset: 17, length: 3, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 20, length: 4, token: Token::Word(Word::Word("many".to_string())) },
+            PositionalToken { source: uws, offset: 24, length: 3, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 27, length: 5, token: Token::Word(Word::Word("apces".to_string())) },
+            PositionalToken { source: uws, offset: 32, length: 3, token: Token::Special(Special::Separator(Separator::Space)) },
         ];        
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
     }
     
     #[test]
     fn word_with_inner_hyphens() {
         let uws = "Опро­сы по­ка­зы­ва­ют";
-        let result = vec![PositionalToken { source: uws, offset: 0, length: 14, token: Token::StrangeWord("Опро­сы".to_string()) },
-                          PositionalToken { source: uws, offset: 14, length: 1, token: Token::Separator(Separator::Space) },
-                          PositionalToken { source: uws, offset: 15, length: 28, token: Token::StrangeWord("по­ка­зы­ва­ют".to_string()) }];        
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 14, token: Token::Word(Word::StrangeWord("Опро­сы".to_string())) },
+            PositionalToken { source: uws, offset: 14, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 15, length: 28, token: Token::Word(Word::StrangeWord("по­ка­зы­ва­ют".to_string())) },
+        ];        
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);        
     }
     
     #[test]
     fn mixed_but_word() {
         let uws = "L’Oreal";
-        let result = vec![PositionalToken { source: uws, offset: 0, length: 9, token: Token::StrangeWord("L’Oreal".to_string()) }];        
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 9, token: Token::Word(Word::StrangeWord("L’Oreal".to_string())) },
+        ];        
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
     }
 
     #[test]
     fn hashtags() {
         let uws = "#hashtag#hashtag2";
-        let result = vec![PositionalToken { source: uws, offset: 0, length: 1, token: Token::Punctuation("#".to_string()) },
-                          PositionalToken { source: uws, offset: 1, length: 7, token: Token::Word("hashtag".to_string()) },
-                          PositionalToken { source: uws, offset: 8, length: 1, token: Token::Punctuation("#".to_string()) },
-                          PositionalToken { source: uws, offset: 9, length: 8, token: Token::Numerical(Numerical::Alphanumeric("hashtag2".to_string())) }];        
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 1, token: Token::Special(Special::Punctuation("#".to_string())) },
+            PositionalToken { source: uws, offset: 1, length: 7, token: Token::Word(Word::Word("hashtag".to_string())) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Punctuation("#".to_string())) },
+            PositionalToken { source: uws, offset: 9, length: 8, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("hashtag2".to_string()))) },
+        ];        
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
     }
 
@@ -1124,13 +575,13 @@ mod test {
     fn apostrophe() {
         let uws = "l'oreal; l\u{0060}oreal";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word("l'oreal".to_string()) },
-            PositionalToken { source: uws, offset: 7, length: 1, token: Token::Punctuation(";".to_string()) },
-            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 9, length: 7, token: Token::Word("l'oreal".to_string()) },
+            PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word(Word::Word("l'oreal".to_string())) },
+            PositionalToken { source: uws, offset: 7, length: 1, token: Token::Special(Special::Punctuation(";".to_string())) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 9, length: 7, token: Token::Word(Word::Word("l'oreal".to_string())) },
         ];
         let text = Text::new(uws.into_source()).unwrap();
-        let lib_res = text.into_tokens().filter_map(|tt| tt.into_original_token()).collect::<Vec<_>>();
+        let lib_res = text.into_tokenizer(TokenizerParams::v1()).filter_map(|tt| tt.into_original_token_1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
     }
 
@@ -1138,105 +589,105 @@ mod test {
     fn char_tokens() {
         let uws = "[Oxana Putan|1712640565] shared the quick (\"brown\") fox can't jump 32.3 feet, right? 4pda etc. qeq U.S.A  asd\n\n\nBrr, it's 29.3°F!\n Русское предложение #36.6 для тестирования деления по юникод-словам...\n🇷🇺 🇸🇹\n👱🏿👶🏽👨🏽\n+Done! Готово";
         let result = vec![
-            CharToken { byte_offset: 0, byte_length: 1, char_offset: 0, char_length: 1, token: Token::Punctuation("[".to_string()) },
-            CharToken { byte_offset: 1, byte_length: 5, char_offset: 1, char_length: 5, token: Token::Word("Oxana".to_string()) },
-            CharToken { byte_offset: 6, byte_length: 1, char_offset: 6, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 7, byte_length: 5, char_offset: 7, char_length: 5, token: Token::Word("Putan".to_string()) },
-            CharToken { byte_offset: 12, byte_length: 1, char_offset: 12, char_length: 1, token: Token::Punctuation("|".to_string()) },            
-            CharToken { byte_offset: 13, byte_length: 10, char_offset: 13, char_length: 10, token: Token::Number(Number::Integer(1712640565)) },
-            CharToken { byte_offset: 23, byte_length: 1, char_offset: 23, char_length: 1, token: Token::Punctuation("]".to_string()) },
+            CharToken { byte_offset: 0, byte_length: 1, char_offset: 0, char_length: 1, token: Token::Special(Special::Punctuation("[".to_string())) },
+            CharToken { byte_offset: 1, byte_length: 5, char_offset: 1, char_length: 5, token: Token::Word(Word::Word("Oxana".to_string())) },
+            CharToken { byte_offset: 6, byte_length: 1, char_offset: 6, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 7, byte_length: 5, char_offset: 7, char_length: 5, token: Token::Word(Word::Word("Putan".to_string())) },
+            CharToken { byte_offset: 12, byte_length: 1, char_offset: 12, char_length: 1, token: Token::Special(Special::Punctuation("|".to_string())) },            
+            CharToken { byte_offset: 13, byte_length: 10, char_offset: 13, char_length: 10, token: Token::Word(Word::Number(Number::Integer(1712640565))) },
+            CharToken { byte_offset: 23, byte_length: 1, char_offset: 23, char_length: 1, token: Token::Special(Special::Punctuation("]".to_string())) },
             
             /*CharToken { byte_offset: 0, byte_length: 24, char_offset: 0, char_length: 24, token: Token::BBCode { left: vec![
-                CharToken { byte_offset: 1, byte_length: 5, char_offset: 1, char_length: 5, token: Token::Word("Oxana".to_string()) },
-                CharToken { byte_offset: 6, byte_length: 1, char_offset: 6, char_length: 1, token: Token::Separator(Separator::Space) },
-                CharToken { byte_offset: 7, byte_length: 5, char_offset: 7, char_length: 5, token: Token::Word("Putan".to_string()) },
+                CharToken { byte_offset: 1, byte_length: 5, char_offset: 1, char_length: 5, token: Token::Word(Word::Word("Oxana".to_string())) },
+                CharToken { byte_offset: 6, byte_length: 1, char_offset: 6, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                CharToken { byte_offset: 7, byte_length: 5, char_offset: 7, char_length: 5, token: Token::Word(Word::Word("Putan".to_string())) },
                 ], right: vec![
-                CharToken { byte_offset: 13, byte_length: 10, char_offset: 13, char_length: 10, token: Token::Number(Number::Integer(1712640565)) },
+                CharToken { byte_offset: 13, byte_length: 10, char_offset: 13, char_length: 10, token: Token::Word(Word::Number(Number::Integer(1712640565))) },
                 ] } },*/
-            CharToken { byte_offset: 24, byte_length: 1, char_offset: 24, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 25, byte_length: 6, char_offset: 25, char_length: 6, token: Token::Word("shared".to_string()) },
-            CharToken { byte_offset: 31, byte_length: 1, char_offset: 31, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 32, byte_length: 3, char_offset: 32, char_length: 3, token: Token::Word("the".to_string()) },
-            CharToken { byte_offset: 35, byte_length: 1, char_offset: 35, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 36, byte_length: 5, char_offset: 36, char_length: 5, token: Token::Word("quick".to_string()) },
-            CharToken { byte_offset: 41, byte_length: 1, char_offset: 41, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 42, byte_length: 1, char_offset: 42, char_length: 1, token: Token::Punctuation("(".to_string()) },
-            CharToken { byte_offset: 43, byte_length: 1, char_offset: 43, char_length: 1, token: Token::Punctuation("\"".to_string()) },
-            CharToken { byte_offset: 44, byte_length: 5, char_offset: 44, char_length: 5, token: Token::Word("brown".to_string()) },
-            CharToken { byte_offset: 49, byte_length: 1, char_offset: 49, char_length: 1, token: Token::Punctuation("\"".to_string()) },
-            CharToken { byte_offset: 50, byte_length: 1, char_offset: 50, char_length: 1, token: Token::Punctuation(")".to_string()) },
-            CharToken { byte_offset: 51, byte_length: 1, char_offset: 51, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 52, byte_length: 3, char_offset: 52, char_length: 3, token: Token::Word("fox".to_string()) },
-            CharToken { byte_offset: 55, byte_length: 1, char_offset: 55, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 56, byte_length: 5, char_offset: 56, char_length: 5, token: Token::Word("can\'t".to_string()) },
-            CharToken { byte_offset: 61, byte_length: 1, char_offset: 61, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 62, byte_length: 4, char_offset: 62, char_length: 4, token: Token::Word("jump".to_string()) },
-            CharToken { byte_offset: 66, byte_length: 1, char_offset: 66, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 67, byte_length: 4, char_offset: 67, char_length: 4, token: Token::Number(Number::Float(32.3)) },
-            CharToken { byte_offset: 71, byte_length: 1, char_offset: 71, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 72, byte_length: 4, char_offset: 72, char_length: 4, token: Token::Word("feet".to_string()) },
-            CharToken { byte_offset: 76, byte_length: 1, char_offset: 76, char_length: 1, token: Token::Punctuation(",".to_string()) },
-            CharToken { byte_offset: 77, byte_length: 1, char_offset: 77, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 78, byte_length: 5, char_offset: 78, char_length: 5, token: Token::Word("right".to_string()) },
-            CharToken { byte_offset: 83, byte_length: 1, char_offset: 83, char_length: 1, token: Token::Punctuation("?".to_string()) },
-            CharToken { byte_offset: 84, byte_length: 1, char_offset: 84, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 85, byte_length: 4, char_offset: 85, char_length: 4, token: Token::Numerical(Numerical::Measures("4pda".to_string())) },
-            CharToken { byte_offset: 89, byte_length: 1, char_offset: 89, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 90, byte_length: 3, char_offset: 90, char_length: 3, token: Token::Word("etc".to_string()) },
-            CharToken { byte_offset: 93, byte_length: 1, char_offset: 93, char_length: 1, token: Token::Punctuation(".".to_string()) },
-            CharToken { byte_offset: 94, byte_length: 1, char_offset: 94, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 95, byte_length: 3, char_offset: 95, char_length: 3, token: Token::Word("qeq".to_string()) },
-            CharToken { byte_offset: 98, byte_length: 1, char_offset: 98, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 99, byte_length: 5, char_offset: 99, char_length: 5, token: Token::Word("U.S.A".to_string()) },
-            CharToken { byte_offset: 104, byte_length: 2, char_offset: 104, char_length: 2, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 106, byte_length: 3, char_offset: 106, char_length: 3, token: Token::Word("asd".to_string()) },
-            CharToken { byte_offset: 109, byte_length: 3, char_offset: 109, char_length: 3, token: Token::Separator(Separator::Newline) },
-            CharToken { byte_offset: 112, byte_length: 3, char_offset: 112, char_length: 3, token: Token::Word("Brr".to_string()) },
-            CharToken { byte_offset: 115, byte_length: 1, char_offset: 115, char_length: 1, token: Token::Punctuation(",".to_string()) },
-            CharToken { byte_offset: 116, byte_length: 1, char_offset: 116, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 117, byte_length: 4, char_offset: 117, char_length: 4, token: Token::Word("it\'s".to_string()) },
-            CharToken { byte_offset: 121, byte_length: 1, char_offset: 121, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 122, byte_length: 4, char_offset: 122, char_length: 4, token: Token::Number(Number::Float(29.3)) },
-            CharToken { byte_offset: 126, byte_length: 2, char_offset: 126, char_length: 1, token: Token::Unicode("ub0".to_string()) },
-            CharToken { byte_offset: 128, byte_length: 1, char_offset: 127, char_length: 1, token: Token::Word("F".to_string()) },
-            CharToken { byte_offset: 129, byte_length: 1, char_offset: 128, char_length: 1, token: Token::Punctuation("!".to_string()) },
-            CharToken { byte_offset: 130, byte_length: 1, char_offset: 129, char_length: 1, token: Token::Separator(Separator::Newline) },
-            CharToken { byte_offset: 131, byte_length: 1, char_offset: 130, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 132, byte_length: 14, char_offset: 131, char_length: 7, token: Token::Word("Русское".to_string()) },
-            CharToken { byte_offset: 146, byte_length: 1, char_offset: 138, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 147, byte_length: 22, char_offset: 139, char_length: 11, token: Token::Word("предложение".to_string()) },
-            CharToken { byte_offset: 169, byte_length: 1, char_offset: 150, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 170, byte_length: 5, char_offset: 151, char_length: 5, token: Token::Hashtag("36.6".to_string()) },
-            CharToken { byte_offset: 175, byte_length: 1, char_offset: 156, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 176, byte_length: 6, char_offset: 157, char_length: 3, token: Token::Word("для".to_string()) },
-            CharToken { byte_offset: 182, byte_length: 1, char_offset: 160, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 183, byte_length: 24, char_offset: 161, char_length: 12, token: Token::Word("тестирования".to_string()) },
-            CharToken { byte_offset: 207, byte_length: 1, char_offset: 173, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 208, byte_length: 14, char_offset: 174, char_length: 7, token: Token::Word("деления".to_string()) },
-            CharToken { byte_offset: 222, byte_length: 1, char_offset: 181, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 223, byte_length: 4, char_offset: 182, char_length: 2, token: Token::Word("по".to_string()) },
-            CharToken { byte_offset: 227, byte_length: 1, char_offset: 184, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 228, byte_length: 12, char_offset: 185, char_length: 6, token: Token::Word("юникод".to_string()) },
-            CharToken { byte_offset: 240, byte_length: 1, char_offset: 191, char_length: 1, token: Token::Punctuation("-".to_string()) },
-            CharToken { byte_offset: 241, byte_length: 12, char_offset: 192, char_length: 6, token: Token::Word("словам".to_string()) },
-            CharToken { byte_offset: 253, byte_length: 3, char_offset: 198, char_length: 3, token: Token::Punctuation("...".to_string()) },
-            CharToken { byte_offset: 256, byte_length: 1, char_offset: 201, char_length: 1, token: Token::Separator(Separator::Newline) },
-            CharToken { byte_offset: 257, byte_length: 8, char_offset: 202, char_length: 2, token: Token::Emoji("russia") },
-            CharToken { byte_offset: 265, byte_length: 1, char_offset: 204, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 266, byte_length: 8, char_offset: 205, char_length: 2, token: Token::Emoji("sao_tome_and_principe") },
-            CharToken { byte_offset: 274, byte_length: 1, char_offset: 207, char_length: 1, token: Token::Separator(Separator::Newline) },
-            CharToken { byte_offset: 275, byte_length: 8, char_offset: 208, char_length: 2, token: Token::Emoji("blond_haired_person_dark_skin_tone") },
-            CharToken { byte_offset: 283, byte_length: 8, char_offset: 210, char_length: 2, token: Token::Emoji("baby_medium_skin_tone") },
-            CharToken { byte_offset: 291, byte_length: 8, char_offset: 212, char_length: 2, token: Token::Emoji("man_medium_skin_tone") },
-            CharToken { byte_offset: 299, byte_length: 1, char_offset: 214, char_length: 1, token: Token::Separator(Separator::Newline) },
-            CharToken { byte_offset: 300, byte_length: 1, char_offset: 215, char_length: 1, token: Token::Punctuation("+".to_string()) },
-            CharToken { byte_offset: 301, byte_length: 4, char_offset: 216, char_length: 4, token: Token::Word("Done".to_string()) },
-            CharToken { byte_offset: 305, byte_length: 1, char_offset: 220, char_length: 1, token: Token::Punctuation("!".to_string()) },
-            CharToken { byte_offset: 306, byte_length: 1, char_offset: 221, char_length: 1, token: Token::Separator(Separator::Space) },
-            CharToken { byte_offset: 307, byte_length: 12, char_offset: 222, char_length: 6, token: Token::Word("Готово".to_string()) },
+            CharToken { byte_offset: 24, byte_length: 1, char_offset: 24, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 25, byte_length: 6, char_offset: 25, char_length: 6, token: Token::Word(Word::Word("shared".to_string())) },
+            CharToken { byte_offset: 31, byte_length: 1, char_offset: 31, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 32, byte_length: 3, char_offset: 32, char_length: 3, token: Token::Word(Word::Word("the".to_string())) },
+            CharToken { byte_offset: 35, byte_length: 1, char_offset: 35, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 36, byte_length: 5, char_offset: 36, char_length: 5, token: Token::Word(Word::Word("quick".to_string())) },
+            CharToken { byte_offset: 41, byte_length: 1, char_offset: 41, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 42, byte_length: 1, char_offset: 42, char_length: 1, token: Token::Special(Special::Punctuation("(".to_string())) },
+            CharToken { byte_offset: 43, byte_length: 1, char_offset: 43, char_length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            CharToken { byte_offset: 44, byte_length: 5, char_offset: 44, char_length: 5, token: Token::Word(Word::Word("brown".to_string())) },
+            CharToken { byte_offset: 49, byte_length: 1, char_offset: 49, char_length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            CharToken { byte_offset: 50, byte_length: 1, char_offset: 50, char_length: 1, token: Token::Special(Special::Punctuation(")".to_string())) },
+            CharToken { byte_offset: 51, byte_length: 1, char_offset: 51, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 52, byte_length: 3, char_offset: 52, char_length: 3, token: Token::Word(Word::Word("fox".to_string())) },
+            CharToken { byte_offset: 55, byte_length: 1, char_offset: 55, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 56, byte_length: 5, char_offset: 56, char_length: 5, token: Token::Word(Word::Word("can\'t".to_string())) },
+            CharToken { byte_offset: 61, byte_length: 1, char_offset: 61, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 62, byte_length: 4, char_offset: 62, char_length: 4, token: Token::Word(Word::Word("jump".to_string())) },
+            CharToken { byte_offset: 66, byte_length: 1, char_offset: 66, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 67, byte_length: 4, char_offset: 67, char_length: 4, token: Token::Word(Word::Number(Number::Float(32.3))) },
+            CharToken { byte_offset: 71, byte_length: 1, char_offset: 71, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 72, byte_length: 4, char_offset: 72, char_length: 4, token: Token::Word(Word::Word("feet".to_string())) },
+            CharToken { byte_offset: 76, byte_length: 1, char_offset: 76, char_length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            CharToken { byte_offset: 77, byte_length: 1, char_offset: 77, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 78, byte_length: 5, char_offset: 78, char_length: 5, token: Token::Word(Word::Word("right".to_string())) },
+            CharToken { byte_offset: 83, byte_length: 1, char_offset: 83, char_length: 1, token: Token::Special(Special::Punctuation("?".to_string())) },
+            CharToken { byte_offset: 84, byte_length: 1, char_offset: 84, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 85, byte_length: 4, char_offset: 85, char_length: 4, token: Token::Word(Word::Numerical(Numerical::Measures("4pda".to_string()))) },
+            CharToken { byte_offset: 89, byte_length: 1, char_offset: 89, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 90, byte_length: 3, char_offset: 90, char_length: 3, token: Token::Word(Word::Word("etc".to_string())) },
+            CharToken { byte_offset: 93, byte_length: 1, char_offset: 93, char_length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            CharToken { byte_offset: 94, byte_length: 1, char_offset: 94, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 95, byte_length: 3, char_offset: 95, char_length: 3, token: Token::Word(Word::Word("qeq".to_string())) },
+            CharToken { byte_offset: 98, byte_length: 1, char_offset: 98, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 99, byte_length: 5, char_offset: 99, char_length: 5, token: Token::Word(Word::Word("U.S.A".to_string())) },
+            CharToken { byte_offset: 104, byte_length: 2, char_offset: 104, char_length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 106, byte_length: 3, char_offset: 106, char_length: 3, token: Token::Word(Word::Word("asd".to_string())) },
+            CharToken { byte_offset: 109, byte_length: 3, char_offset: 109, char_length: 3, token: Token::Special(Special::Separator(Separator::Newline)) },
+            CharToken { byte_offset: 112, byte_length: 3, char_offset: 112, char_length: 3, token: Token::Word(Word::Word("Brr".to_string())) },
+            CharToken { byte_offset: 115, byte_length: 1, char_offset: 115, char_length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            CharToken { byte_offset: 116, byte_length: 1, char_offset: 116, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 117, byte_length: 4, char_offset: 117, char_length: 4, token: Token::Word(Word::Word("it\'s".to_string())) },
+            CharToken { byte_offset: 121, byte_length: 1, char_offset: 121, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 122, byte_length: 4, char_offset: 122, char_length: 4, token: Token::Word(Word::Number(Number::Float(29.3))) },
+            CharToken { byte_offset: 126, byte_length: 2, char_offset: 126, char_length: 1, token: Token::Special(Special::Symbol('°')) },
+            CharToken { byte_offset: 128, byte_length: 1, char_offset: 127, char_length: 1, token: Token::Word(Word::Word("F".to_string())) },
+            CharToken { byte_offset: 129, byte_length: 1, char_offset: 128, char_length: 1, token: Token::Special(Special::Punctuation("!".to_string())) },
+            CharToken { byte_offset: 130, byte_length: 1, char_offset: 129, char_length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            CharToken { byte_offset: 131, byte_length: 1, char_offset: 130, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 132, byte_length: 14, char_offset: 131, char_length: 7, token: Token::Word(Word::Word("Русское".to_string())) },
+            CharToken { byte_offset: 146, byte_length: 1, char_offset: 138, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 147, byte_length: 22, char_offset: 139, char_length: 11, token: Token::Word(Word::Word("предложение".to_string())) },
+            CharToken { byte_offset: 169, byte_length: 1, char_offset: 150, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 170, byte_length: 5, char_offset: 151, char_length: 5, token: Token::Struct(Struct::Hashtag("36.6".to_string())) },
+            CharToken { byte_offset: 175, byte_length: 1, char_offset: 156, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 176, byte_length: 6, char_offset: 157, char_length: 3, token: Token::Word(Word::Word("для".to_string())) },
+            CharToken { byte_offset: 182, byte_length: 1, char_offset: 160, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 183, byte_length: 24, char_offset: 161, char_length: 12, token: Token::Word(Word::Word("тестирования".to_string())) },
+            CharToken { byte_offset: 207, byte_length: 1, char_offset: 173, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 208, byte_length: 14, char_offset: 174, char_length: 7, token: Token::Word(Word::Word("деления".to_string())) },
+            CharToken { byte_offset: 222, byte_length: 1, char_offset: 181, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 223, byte_length: 4, char_offset: 182, char_length: 2, token: Token::Word(Word::Word("по".to_string())) },
+            CharToken { byte_offset: 227, byte_length: 1, char_offset: 184, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 228, byte_length: 12, char_offset: 185, char_length: 6, token: Token::Word(Word::Word("юникод".to_string())) },
+            CharToken { byte_offset: 240, byte_length: 1, char_offset: 191, char_length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+            CharToken { byte_offset: 241, byte_length: 12, char_offset: 192, char_length: 6, token: Token::Word(Word::Word("словам".to_string())) },
+            CharToken { byte_offset: 253, byte_length: 3, char_offset: 198, char_length: 3, token: Token::Special(Special::Punctuation("...".to_string())) },
+            CharToken { byte_offset: 256, byte_length: 1, char_offset: 201, char_length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            CharToken { byte_offset: 257, byte_length: 8, char_offset: 202, char_length: 2, token: Token::Word(Word::Emoji("russia")) },
+            CharToken { byte_offset: 265, byte_length: 1, char_offset: 204, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 266, byte_length: 8, char_offset: 205, char_length: 2, token: Token::Word(Word::Emoji("sao_tome_and_principe")) },
+            CharToken { byte_offset: 274, byte_length: 1, char_offset: 207, char_length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            CharToken { byte_offset: 275, byte_length: 8, char_offset: 208, char_length: 2, token: Token::Word(Word::Emoji("blond_haired_person_dark_skin_tone")) },
+            CharToken { byte_offset: 283, byte_length: 8, char_offset: 210, char_length: 2, token: Token::Word(Word::Emoji("baby_medium_skin_tone")) },
+            CharToken { byte_offset: 291, byte_length: 8, char_offset: 212, char_length: 2, token: Token::Word(Word::Emoji("man_medium_skin_tone")) },
+            CharToken { byte_offset: 299, byte_length: 1, char_offset: 214, char_length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            CharToken { byte_offset: 300, byte_length: 1, char_offset: 215, char_length: 1, token: Token::Special(Special::Punctuation("+".to_string())) },
+            CharToken { byte_offset: 301, byte_length: 4, char_offset: 216, char_length: 4, token: Token::Word(Word::Word("Done".to_string())) },
+            CharToken { byte_offset: 305, byte_length: 1, char_offset: 220, char_length: 1, token: Token::Special(Special::Punctuation("!".to_string())) },
+            CharToken { byte_offset: 306, byte_length: 1, char_offset: 221, char_length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            CharToken { byte_offset: 307, byte_length: 12, char_offset: 222, char_length: 6, token: Token::Word(Word::Word("Готово".to_string())) },
             ];
 
-        let lib_res = uws.complex_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::complex()).collect::<Vec<_>>();
 
         //print_cresult(); panic!();
         check_cresults(&result,&lib_res,uws);
@@ -1246,78 +697,78 @@ mod test {
     fn general_default() {
         let uws = "The quick (\"brown\") fox can't jump 32.3 feet, right? 4pda etc. qeq U.S.A  asd\n\n\nBrr, it's 29.3°F!\n Русское предложение #36.6 для тестирования деления по юникод-словам...\n";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word("The".to_string()) },
-            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 4, length: 5, token: Token::Word("quick".to_string()) },
-            PositionalToken { source: uws, offset: 9, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 10, length: 1, token: Token::Punctuation("(".to_string()) },
-            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Punctuation("\"".to_string()) },
-            PositionalToken { source: uws, offset: 12, length: 5, token: Token::Word("brown".to_string()) },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Punctuation("\"".to_string()) },
-            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Punctuation(")".to_string()) },
-            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 20, length: 3, token: Token::Word("fox".to_string()) },
-            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 24, length: 5, token: Token::Word("can\'t".to_string()) },
-            PositionalToken { source: uws, offset: 29, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 30, length: 4, token: Token::Word("jump".to_string()) },
-            PositionalToken { source: uws, offset: 34, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 35, length: 4, token: Token::Number(Number::Float(32.3)) },
-            PositionalToken { source: uws, offset: 39, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 40, length: 4, token: Token::Word("feet".to_string()) },
-            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 45, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 46, length: 5, token: Token::Word("right".to_string()) },
-            PositionalToken { source: uws, offset: 51, length: 1, token: Token::Punctuation("?".to_string()) },
-            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 53, length: 4, token: Token::Numerical(Numerical::Measures("4pda".to_string())) }, // TODO
-            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 58, length: 3, token: Token::Word("etc".to_string()) },
-            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 63, length: 3, token: Token::Word("qeq".to_string()) },
-            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 67, length: 1, token: Token::Word("U".to_string()) },
-            PositionalToken { source: uws, offset: 68, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 69, length: 1, token: Token::Word("S".to_string()) },
-            PositionalToken { source: uws, offset: 70, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 71, length: 1, token: Token::Word("A".to_string()) },
-            PositionalToken { source: uws, offset: 72, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word("asd".to_string()) },
-            PositionalToken { source: uws, offset: 77, length: 3, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word("Brr".to_string()) },
-            PositionalToken { source: uws, offset: 83, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 84, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 85, length: 4, token: Token::Word("it\'s".to_string()) },
-            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 90, length: 4, token: Token::Number(Number::Float(29.3)) },
-            PositionalToken { source: uws, offset: 94, length: 2, token: Token::Unicode("ub0".to_string()) },
-            PositionalToken { source: uws, offset: 96, length: 1, token: Token::Word("F".to_string()) },
-            PositionalToken { source: uws, offset: 97, length: 1, token: Token::Punctuation("!".to_string()) },
-            PositionalToken { source: uws, offset: 98, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 99, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 100, length: 14, token: Token::Word("Русское".to_string()) },
-            PositionalToken { source: uws, offset: 114, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 115, length: 22, token: Token::Word("предложение".to_string()) },
-            PositionalToken { source: uws, offset: 137, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 138, length: 1, token: Token::Punctuation("#".to_string()) },
-            PositionalToken { source: uws, offset: 139, length: 4, token: Token::Number(Number::Float(36.6)) },
-            PositionalToken { source: uws, offset: 143, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word("для".to_string()) },
-            PositionalToken { source: uws, offset: 150, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 151, length: 24, token: Token::Word("тестирования".to_string()) },
-            PositionalToken { source: uws, offset: 175, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 176, length: 14, token: Token::Word("деления".to_string()) },
-            PositionalToken { source: uws, offset: 190, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 191, length: 4, token: Token::Word("по".to_string()) },
-            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 196, length: 12, token: Token::Word("юникод".to_string()) },
-            PositionalToken { source: uws, offset: 208, length: 1, token: Token::Punctuation("-".to_string()) },
-            PositionalToken { source: uws, offset: 209, length: 12, token: Token::Word("словам".to_string()) },
-            PositionalToken { source: uws, offset: 221, length: 3, token: Token::Punctuation("...".to_string()) },
-            PositionalToken { source: uws, offset: 224, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Word("The".to_string())) },
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 5, token: Token::Word(Word::Word("quick".to_string())) },
+            PositionalToken { source: uws, offset: 9, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 10, length: 1, token: Token::Special(Special::Punctuation("(".to_string())) },
+            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            PositionalToken { source: uws, offset: 12, length: 5, token: Token::Word(Word::Word("brown".to_string())) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Special(Special::Punctuation(")".to_string())) },
+            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 20, length: 3, token: Token::Word(Word::Word("fox".to_string())) },
+            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 24, length: 5, token: Token::Word(Word::Word("can\'t".to_string())) },
+            PositionalToken { source: uws, offset: 29, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 30, length: 4, token: Token::Word(Word::Word("jump".to_string())) },
+            PositionalToken { source: uws, offset: 34, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 35, length: 4, token: Token::Word(Word::Number(Number::Float(32.3))) },
+            PositionalToken { source: uws, offset: 39, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 40, length: 4, token: Token::Word(Word::Word("feet".to_string())) },
+            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 45, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 46, length: 5, token: Token::Word(Word::Word("right".to_string())) },
+            PositionalToken { source: uws, offset: 51, length: 1, token: Token::Special(Special::Punctuation("?".to_string())) },
+            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 53, length: 4, token: Token::Word(Word::Numerical(Numerical::Measures("4pda".to_string()))) }, // TODO
+            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 58, length: 3, token: Token::Word(Word::Word("etc".to_string())) },
+            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 63, length: 3, token: Token::Word(Word::Word("qeq".to_string())) },
+            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 67, length: 1, token: Token::Word(Word::Word("U".to_string())) },
+            PositionalToken { source: uws, offset: 68, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 69, length: 1, token: Token::Word(Word::Word("S".to_string())) },
+            PositionalToken { source: uws, offset: 70, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 71, length: 1, token: Token::Word(Word::Word("A".to_string())) },
+            PositionalToken { source: uws, offset: 72, length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word(Word::Word("asd".to_string())) },
+            PositionalToken { source: uws, offset: 77, length: 3, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word(Word::Word("Brr".to_string())) },
+            PositionalToken { source: uws, offset: 83, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 84, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 85, length: 4, token: Token::Word(Word::Word("it\'s".to_string())) },
+            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 90, length: 4, token: Token::Word(Word::Number(Number::Float(29.3))) },
+            PositionalToken { source: uws, offset: 94, length: 2, token: Token::Special(Special::Symbol('°')) },
+            PositionalToken { source: uws, offset: 96, length: 1, token: Token::Word(Word::Word("F".to_string())) },
+            PositionalToken { source: uws, offset: 97, length: 1, token: Token::Special(Special::Punctuation("!".to_string())) },
+            PositionalToken { source: uws, offset: 98, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 99, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 100, length: 14, token: Token::Word(Word::Word("Русское".to_string())) },
+            PositionalToken { source: uws, offset: 114, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 115, length: 22, token: Token::Word(Word::Word("предложение".to_string())) },
+            PositionalToken { source: uws, offset: 137, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 138, length: 1, token: Token::Special(Special::Punctuation("#".to_string())) },
+            PositionalToken { source: uws, offset: 139, length: 4, token: Token::Word(Word::Number(Number::Float(36.6))) },
+            PositionalToken { source: uws, offset: 143, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word(Word::Word("для".to_string())) },
+            PositionalToken { source: uws, offset: 150, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 151, length: 24, token: Token::Word(Word::Word("тестирования".to_string())) },
+            PositionalToken { source: uws, offset: 175, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 176, length: 14, token: Token::Word(Word::Word("деления".to_string())) },
+            PositionalToken { source: uws, offset: 190, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 191, length: 4, token: Token::Word(Word::Word("по".to_string())) },
+            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 196, length: 12, token: Token::Word(Word::Word("юникод".to_string())) },
+            PositionalToken { source: uws, offset: 208, length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+            PositionalToken { source: uws, offset: 209, length: 12, token: Token::Word(Word::Word("словам".to_string())) },
+            PositionalToken { source: uws, offset: 221, length: 3, token: Token::Special(Special::Punctuation("...".to_string())) },
+            PositionalToken { source: uws, offset: 224, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             ];
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
     }
 
@@ -1325,74 +776,77 @@ mod test {
     fn general_no_split() {
         let uws = "The quick (\"brown\") fox can't jump 32.3 feet, right? 4pda etc. qeq U.S.A  asd\n\n\nBrr, it's 29.3°F!\n Русское предложение #36.6 для тестирования деления по юникод-словам...\n";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word("The".to_string()) },
-            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 4, length: 5, token: Token::Word("quick".to_string()) },
-            PositionalToken { source: uws, offset: 9, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 10, length: 1, token: Token::Punctuation("(".to_string()) },
-            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Punctuation("\"".to_string()) },
-            PositionalToken { source: uws, offset: 12, length: 5, token: Token::Word("brown".to_string()) },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Punctuation("\"".to_string()) },
-            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Punctuation(")".to_string()) },
-            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 20, length: 3, token: Token::Word("fox".to_string()) },
-            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 24, length: 5, token: Token::Word("can\'t".to_string()) },
-            PositionalToken { source: uws, offset: 29, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 30, length: 4, token: Token::Word("jump".to_string()) },
-            PositionalToken { source: uws, offset: 34, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 35, length: 4, token: Token::Number(Number::Float(32.3)) },
-            PositionalToken { source: uws, offset: 39, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 40, length: 4, token: Token::Word("feet".to_string()) },
-            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 45, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 46, length: 5, token: Token::Word("right".to_string()) },
-            PositionalToken { source: uws, offset: 51, length: 1, token: Token::Punctuation("?".to_string()) },
-            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 53, length: 4, token: Token::Numerical(Numerical::Measures("4pda".to_string())) }, // TODO
-            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 58, length: 3, token: Token::Word("etc".to_string()) },
-            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 63, length: 3, token: Token::Word("qeq".to_string()) },
-            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 67, length: 5, token: Token::Word("U.S.A".to_string()) },
-            PositionalToken { source: uws, offset: 72, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word("asd".to_string()) },
-            PositionalToken { source: uws, offset: 77, length: 3, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word("Brr".to_string()) },
-            PositionalToken { source: uws, offset: 83, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 84, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 85, length: 4, token: Token::Word("it\'s".to_string()) },
-            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 90, length: 4, token: Token::Number(Number::Float(29.3)) },
-            PositionalToken { source: uws, offset: 94, length: 2, token: Token::Unicode("ub0".to_string()) },
-            PositionalToken { source: uws, offset: 96, length: 1, token: Token::Word("F".to_string()) },
-            PositionalToken { source: uws, offset: 97, length: 1, token: Token::Punctuation("!".to_string()) },
-            PositionalToken { source: uws, offset: 98, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 99, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 100, length: 14, token: Token::Word("Русское".to_string()) },
-            PositionalToken { source: uws, offset: 114, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 115, length: 22, token: Token::Word("предложение".to_string()) },
-            PositionalToken { source: uws, offset: 137, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 138, length: 1, token: Token::Punctuation("#".to_string()) },
-            PositionalToken { source: uws, offset: 139, length: 4, token: Token::Number(Number::Float(36.6)) },
-            PositionalToken { source: uws, offset: 143, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word("для".to_string()) },
-            PositionalToken { source: uws, offset: 150, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 151, length: 24, token: Token::Word("тестирования".to_string()) },
-            PositionalToken { source: uws, offset: 175, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 176, length: 14, token: Token::Word("деления".to_string()) },
-            PositionalToken { source: uws, offset: 190, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 191, length: 4, token: Token::Word("по".to_string()) },
-            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 196, length: 12, token: Token::Word("юникод".to_string()) },
-            PositionalToken { source: uws, offset: 208, length: 1, token: Token::Punctuation("-".to_string()) },
-            PositionalToken { source: uws, offset: 209, length: 12, token: Token::Word("словам".to_string()) },
-            PositionalToken { source: uws, offset: 221, length: 3, token: Token::Punctuation("...".to_string()) },
-            PositionalToken { source: uws, offset: 224, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Word("The".to_string())) },
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 5, token: Token::Word(Word::Word("quick".to_string())) },
+            PositionalToken { source: uws, offset: 9, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 10, length: 1, token: Token::Special(Special::Punctuation("(".to_string())) },
+            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            PositionalToken { source: uws, offset: 12, length: 5, token: Token::Word(Word::Word("brown".to_string())) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Special(Special::Punctuation(")".to_string())) },
+            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 20, length: 3, token: Token::Word(Word::Word("fox".to_string())) },
+            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 24, length: 5, token: Token::Word(Word::Word("can\'t".to_string())) },
+            PositionalToken { source: uws, offset: 29, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 30, length: 4, token: Token::Word(Word::Word("jump".to_string())) },
+            PositionalToken { source: uws, offset: 34, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 35, length: 4, token: Token::Word(Word::Number(Number::Float(32.3))) },
+            PositionalToken { source: uws, offset: 39, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 40, length: 4, token: Token::Word(Word::Word("feet".to_string())) },
+            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 45, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 46, length: 5, token: Token::Word(Word::Word("right".to_string())) },
+            PositionalToken { source: uws, offset: 51, length: 1, token: Token::Special(Special::Punctuation("?".to_string())) },
+            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 53, length: 4, token: Token::Word(Word::Numerical(Numerical::Measures("4pda".to_string()))) }, // TODO
+            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 58, length: 3, token: Token::Word(Word::Word("etc".to_string())) },
+            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 63, length: 3, token: Token::Word(Word::Word("qeq".to_string())) },
+            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 67, length: 5, token: Token::Word(Word::Word("U.S.A".to_string())) },
+            PositionalToken { source: uws, offset: 72, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 73, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word(Word::Word("asd".to_string())) },
+            PositionalToken { source: uws, offset: 77, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 78, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 79, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word(Word::Word("Brr".to_string())) },
+            PositionalToken { source: uws, offset: 83, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 84, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 85, length: 4, token: Token::Word(Word::Word("it\'s".to_string())) },
+            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 90, length: 4, token: Token::Word(Word::Number(Number::Float(29.3))) },
+            PositionalToken { source: uws, offset: 94, length: 2, token: Token::Special(Special::Symbol('°')) },
+            PositionalToken { source: uws, offset: 96, length: 1, token: Token::Word(Word::Word("F".to_string())) },
+            PositionalToken { source: uws, offset: 97, length: 1, token: Token::Special(Special::Punctuation("!".to_string())) },
+            PositionalToken { source: uws, offset: 98, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 99, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 100, length: 14, token: Token::Word(Word::Word("Русское".to_string())) },
+            PositionalToken { source: uws, offset: 114, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 115, length: 22, token: Token::Word(Word::Word("предложение".to_string())) },
+            PositionalToken { source: uws, offset: 137, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 138, length: 1, token: Token::Special(Special::Punctuation("#".to_string())) },
+            PositionalToken { source: uws, offset: 139, length: 4, token: Token::Word(Word::Number(Number::Float(36.6))) },
+            PositionalToken { source: uws, offset: 143, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word(Word::Word("для".to_string())) },
+            PositionalToken { source: uws, offset: 150, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 151, length: 24, token: Token::Word(Word::Word("тестирования".to_string())) },
+            PositionalToken { source: uws, offset: 175, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 176, length: 14, token: Token::Word(Word::Word("деления".to_string())) },
+            PositionalToken { source: uws, offset: 190, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 191, length: 4, token: Token::Word(Word::Word("по".to_string())) },
+            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 196, length: 12, token: Token::Word(Word::Word("юникод".to_string())) },
+            PositionalToken { source: uws, offset: 208, length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+            PositionalToken { source: uws, offset: 209, length: 12, token: Token::Word(Word::Word("словам".to_string())) },
+            PositionalToken { source: uws, offset: 221, length: 3, token: Token::Special(Special::Punctuation("...".to_string())) },
+            PositionalToken { source: uws, offset: 224, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             ];
-        let lib_res = uws.into_tokens_with_options(Default::default()).collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(Default::default()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
     }
     
@@ -1400,73 +854,73 @@ mod test {
     fn general_complex() {
         let uws = "The quick (\"brown\") fox can't jump 32.3 feet, right? 4pda etc. qeq U.S.A  asd\n\n\nBrr, it's 29.3°F!\n Русское предложение #36.6 для тестирования деления по юникод-словам...\n";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word("The".to_string()) },
-            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 4, length: 5, token: Token::Word("quick".to_string()) },
-            PositionalToken { source: uws, offset: 9, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 10, length: 1, token: Token::Punctuation("(".to_string()) },
-            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Punctuation("\"".to_string()) },
-            PositionalToken { source: uws, offset: 12, length: 5, token: Token::Word("brown".to_string()) },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Punctuation("\"".to_string()) },
-            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Punctuation(")".to_string()) },
-            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 20, length: 3, token: Token::Word("fox".to_string()) },
-            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 24, length: 5, token: Token::Word("can\'t".to_string()) },
-            PositionalToken { source: uws, offset: 29, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 30, length: 4, token: Token::Word("jump".to_string()) },
-            PositionalToken { source: uws, offset: 34, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 35, length: 4, token: Token::Number(Number::Float(32.3)) },
-            PositionalToken { source: uws, offset: 39, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 40, length: 4, token: Token::Word("feet".to_string()) },
-            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 45, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 46, length: 5, token: Token::Word("right".to_string()) },
-            PositionalToken { source: uws, offset: 51, length: 1, token: Token::Punctuation("?".to_string()) },
-            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 53, length: 4, token: Token::Numerical(Numerical::Measures("4pda".to_string())) }, // TODO
-            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 58, length: 3, token: Token::Word("etc".to_string()) },
-            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 63, length: 3, token: Token::Word("qeq".to_string()) },
-            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 67, length: 5, token: Token::Word("U.S.A".to_string()) },
-            PositionalToken { source: uws, offset: 72, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word("asd".to_string()) },
-            PositionalToken { source: uws, offset: 77, length: 3, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word("Brr".to_string()) },
-            PositionalToken { source: uws, offset: 83, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 84, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 85, length: 4, token: Token::Word("it\'s".to_string()) },
-            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 90, length: 4, token: Token::Number(Number::Float(29.3)) },
-            PositionalToken { source: uws, offset: 94, length: 2, token: Token::Unicode("ub0".to_string()) },
-            PositionalToken { source: uws, offset: 96, length: 1, token: Token::Word("F".to_string()) },
-            PositionalToken { source: uws, offset: 97, length: 1, token: Token::Punctuation("!".to_string()) },
-            PositionalToken { source: uws, offset: 98, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 99, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 100, length: 14, token: Token::Word("Русское".to_string()) },
-            PositionalToken { source: uws, offset: 114, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 115, length: 22, token: Token::Word("предложение".to_string()) },
-            PositionalToken { source: uws, offset: 137, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 138, length: 5, token: Token::Hashtag("36.6".to_string()) },
-            PositionalToken { source: uws, offset: 143, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word("для".to_string()) },
-            PositionalToken { source: uws, offset: 150, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 151, length: 24, token: Token::Word("тестирования".to_string()) },
-            PositionalToken { source: uws, offset: 175, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 176, length: 14, token: Token::Word("деления".to_string()) },
-            PositionalToken { source: uws, offset: 190, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 191, length: 4, token: Token::Word("по".to_string()) },
-            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 196, length: 12, token: Token::Word("юникод".to_string()) },
-            PositionalToken { source: uws, offset: 208, length: 1, token: Token::Punctuation("-".to_string()) },
-            PositionalToken { source: uws, offset: 209, length: 12, token: Token::Word("словам".to_string()) },
-            PositionalToken { source: uws, offset: 221, length: 3, token: Token::Punctuation("...".to_string()) },
-            PositionalToken { source: uws, offset: 224, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Word("The".to_string())) },
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 5, token: Token::Word(Word::Word("quick".to_string())) },
+            PositionalToken { source: uws, offset: 9, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 10, length: 1, token: Token::Special(Special::Punctuation("(".to_string())) },
+            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            PositionalToken { source: uws, offset: 12, length: 5, token: Token::Word(Word::Word("brown".to_string())) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Punctuation("\"".to_string())) },
+            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Special(Special::Punctuation(")".to_string())) },
+            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 20, length: 3, token: Token::Word(Word::Word("fox".to_string())) },
+            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 24, length: 5, token: Token::Word(Word::Word("can\'t".to_string())) },
+            PositionalToken { source: uws, offset: 29, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 30, length: 4, token: Token::Word(Word::Word("jump".to_string())) },
+            PositionalToken { source: uws, offset: 34, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 35, length: 4, token: Token::Word(Word::Number(Number::Float(32.3))) },
+            PositionalToken { source: uws, offset: 39, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 40, length: 4, token: Token::Word(Word::Word("feet".to_string())) },
+            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 45, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 46, length: 5, token: Token::Word(Word::Word("right".to_string())) },
+            PositionalToken { source: uws, offset: 51, length: 1, token: Token::Special(Special::Punctuation("?".to_string())) },
+            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 53, length: 4, token: Token::Word(Word::Numerical(Numerical::Measures("4pda".to_string()))) }, // TODO
+            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 58, length: 3, token: Token::Word(Word::Word("etc".to_string())) },
+            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 63, length: 3, token: Token::Word(Word::Word("qeq".to_string())) },
+            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 67, length: 5, token: Token::Word(Word::Word("U.S.A".to_string())) },
+            PositionalToken { source: uws, offset: 72, length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word(Word::Word("asd".to_string())) },
+            PositionalToken { source: uws, offset: 77, length: 3, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word(Word::Word("Brr".to_string())) },
+            PositionalToken { source: uws, offset: 83, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 84, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 85, length: 4, token: Token::Word(Word::Word("it\'s".to_string())) },
+            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 90, length: 4, token: Token::Word(Word::Number(Number::Float(29.3))) },
+            PositionalToken { source: uws, offset: 94, length: 2, token: Token::Special(Special::Symbol('°')) },
+            PositionalToken { source: uws, offset: 96, length: 1, token: Token::Word(Word::Word("F".to_string())) },
+            PositionalToken { source: uws, offset: 97, length: 1, token: Token::Special(Special::Punctuation("!".to_string())) },
+            PositionalToken { source: uws, offset: 98, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 99, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 100, length: 14, token: Token::Word(Word::Word("Русское".to_string())) },
+            PositionalToken { source: uws, offset: 114, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 115, length: 22, token: Token::Word(Word::Word("предложение".to_string())) },
+            PositionalToken { source: uws, offset: 137, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 138, length: 5, token: Token::Struct(Struct::Hashtag("36.6".to_string())) },
+            PositionalToken { source: uws, offset: 143, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word(Word::Word("для".to_string())) },
+            PositionalToken { source: uws, offset: 150, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 151, length: 24, token: Token::Word(Word::Word("тестирования".to_string())) },
+            PositionalToken { source: uws, offset: 175, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 176, length: 14, token: Token::Word(Word::Word("деления".to_string())) },
+            PositionalToken { source: uws, offset: 190, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 191, length: 4, token: Token::Word(Word::Word("по".to_string())) },
+            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 196, length: 12, token: Token::Word(Word::Word("юникод".to_string())) },
+            PositionalToken { source: uws, offset: 208, length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+            PositionalToken { source: uws, offset: 209, length: 12, token: Token::Word(Word::Word("словам".to_string())) },
+            PositionalToken { source: uws, offset: 221, length: 3, token: Token::Special(Special::Punctuation("...".to_string())) },
+            PositionalToken { source: uws, offset: 224, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             ];
-        let lib_res = uws.complex_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::complex()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
     }
 
@@ -1474,23 +928,23 @@ mod test {
     fn plus_minus() {
         let uws = "+23 -4.5 -34 +25.7 - 2 + 5.6";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Number(Number::Integer(23)) },
-            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 4, length: 4, token: Token::Number(Number::Float(-4.5)) },
-            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 9, length: 3, token: Token::Number(Number::Integer(-34)) },
-            PositionalToken { source: uws, offset: 12, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 13, length: 5, token: Token::Number(Number::Float(25.7)) },
-            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Separator(Separator::Space) },           
-            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Punctuation("-".to_string()) },
-            PositionalToken { source: uws, offset: 20, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 21, length: 1, token: Token::Number(Number::Integer(2)) },
-            PositionalToken { source: uws, offset: 22, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Punctuation("+".to_string()) },
-            PositionalToken { source: uws, offset: 24, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 25, length: 3, token: Token::Number(Number::Float(5.6)) },
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Integer(23))) },
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 4, token: Token::Word(Word::Number(Number::Float(-4.5))) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 9, length: 3, token: Token::Word(Word::Number(Number::Integer(-34))) },
+            PositionalToken { source: uws, offset: 12, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 13, length: 5, token: Token::Word(Word::Number(Number::Float(25.7))) },
+            PositionalToken { source: uws, offset: 18, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },           
+            PositionalToken { source: uws, offset: 19, length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+            PositionalToken { source: uws, offset: 20, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 21, length: 1, token: Token::Word(Word::Number(Number::Integer(2))) },
+            PositionalToken { source: uws, offset: 22, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Special(Special::Punctuation("+".to_string())) },
+            PositionalToken { source: uws, offset: 24, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 25, length: 3, token: Token::Word(Word::Number(Number::Float(5.6))) },
             ];
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check(&result,&lib_res,uws);
         //print_result(&lib_res); panic!("")
     } 
@@ -1499,8 +953,10 @@ mod test {
     #[ignore]
     fn woman_bouncing_ball() {
         let uws = "\u{26f9}\u{200d}\u{2640}";
-        let result = vec![PositionalToken { source: uws, offset: 0, length: 9, token: Token::Emoji("woman_bouncing_ball") }];
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 9, token: Token::Word(Word::Emoji("woman_bouncing_ball")) },
+        ];
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
         //print_result(&lib_res); panic!("")
     } 
@@ -1509,32 +965,32 @@ mod test {
     fn emoji_and_rusabbr_default() {
         let uws = "🇷🇺 🇸🇹\n👱🏿👶🏽👨🏽\n👱\nС.С.С.Р.\n👨‍👩‍👦‍👦\n🧠\n";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 8, token: Token::Emoji("russia") },
-            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 9, length: 8, token: Token::Emoji("sao_tome_and_principe") },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 18, length: 8, token: Token::Emoji("blond_haired_person_dark_skin_tone") },
-            PositionalToken { source: uws, offset: 26, length: 8, token: Token::Emoji("baby_medium_skin_tone") },
-            PositionalToken { source: uws, offset: 34, length: 8, token: Token::Emoji("man_medium_skin_tone") },
-            PositionalToken { source: uws, offset: 42, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 43, length: 4, token: Token::Emoji("blond_haired_person") },
-            PositionalToken { source: uws, offset: 47, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 48, length: 2, token: Token::Word("С".to_string()) },
-            PositionalToken { source: uws, offset: 50, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 51, length: 2, token: Token::Word("С".to_string()) },
-            PositionalToken { source: uws, offset: 53, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 54, length: 2, token: Token::Word("С".to_string()) },
-            PositionalToken { source: uws, offset: 56, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 57, length: 2, token: Token::Word("Р".to_string()) },
-            PositionalToken { source: uws, offset: 59, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 60, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 61, length: 25, token: Token::Emoji("family_man_woman_boy_boy") },
-            PositionalToken { source: uws, offset: 86, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 87, length: 4, token: Token::Emoji("brain") },
-            PositionalToken { source: uws, offset: 91, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { source: uws, offset: 0, length: 8, token: Token::Word(Word::Emoji("russia")) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 9, length: 8, token: Token::Word(Word::Emoji("sao_tome_and_principe")) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 18, length: 8, token: Token::Word(Word::Emoji("blond_haired_person_dark_skin_tone")) },
+            PositionalToken { source: uws, offset: 26, length: 8, token: Token::Word(Word::Emoji("baby_medium_skin_tone")) },
+            PositionalToken { source: uws, offset: 34, length: 8, token: Token::Word(Word::Emoji("man_medium_skin_tone")) },
+            PositionalToken { source: uws, offset: 42, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 43, length: 4, token: Token::Word(Word::Emoji("blond_haired_person")) },
+            PositionalToken { source: uws, offset: 47, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 48, length: 2, token: Token::Word(Word::Word("С".to_string())) },
+            PositionalToken { source: uws, offset: 50, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 51, length: 2, token: Token::Word(Word::Word("С".to_string())) },
+            PositionalToken { source: uws, offset: 53, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 54, length: 2, token: Token::Word(Word::Word("С".to_string())) },
+            PositionalToken { source: uws, offset: 56, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 57, length: 2, token: Token::Word(Word::Word("Р".to_string())) },
+            PositionalToken { source: uws, offset: 59, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 60, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 61, length: 25, token: Token::Word(Word::Emoji("family_man_woman_boy_boy")) },
+            PositionalToken { source: uws, offset: 86, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 87, length: 4, token: Token::Word(Word::Emoji("brain")) },
+            PositionalToken { source: uws, offset: 91, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             ];
         
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
         //print_result(&lib_res); panic!();
     }
@@ -1543,26 +999,26 @@ mod test {
     fn emoji_and_rusabbr_no_split() {
         let uws = "🇷🇺 🇸🇹\n👱🏿👶🏽👨🏽\n👱\nС.С.С.Р.\n👨‍👩‍👦‍👦\n🧠\n";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 8, token: Token::Emoji("russia") },
-            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 9, length: 8, token: Token::Emoji("sao_tome_and_principe") },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 18, length: 8, token: Token::Emoji("blond_haired_person_dark_skin_tone") },
-            PositionalToken { source: uws, offset: 26, length: 8, token: Token::Emoji("baby_medium_skin_tone") },
-            PositionalToken { source: uws, offset: 34, length: 8, token: Token::Emoji("man_medium_skin_tone") },
-            PositionalToken { source: uws, offset: 42, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 43, length: 4, token: Token::Emoji("blond_haired_person") },
-            PositionalToken { source: uws, offset: 47, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 48, length: 11, token: Token::Word("С.С.С.Р".to_string()) },
-            PositionalToken { source: uws, offset: 59, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 60, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 61, length: 25, token: Token::Emoji("family_man_woman_boy_boy") },
-            PositionalToken { source: uws, offset: 86, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 87, length: 4, token: Token::Emoji("brain") },
-            PositionalToken { source: uws, offset: 91, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { source: uws, offset: 0, length: 8, token: Token::Word(Word::Emoji("russia")) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 9, length: 8, token: Token::Word(Word::Emoji("sao_tome_and_principe")) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 18, length: 8, token: Token::Word(Word::Emoji("blond_haired_person_dark_skin_tone")) },
+            PositionalToken { source: uws, offset: 26, length: 8, token: Token::Word(Word::Emoji("baby_medium_skin_tone")) },
+            PositionalToken { source: uws, offset: 34, length: 8, token: Token::Word(Word::Emoji("man_medium_skin_tone")) },
+            PositionalToken { source: uws, offset: 42, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 43, length: 4, token: Token::Word(Word::Emoji("blond_haired_person")) },
+            PositionalToken { source: uws, offset: 47, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 48, length: 11, token: Token::Word(Word::Word("С.С.С.Р".to_string())) },
+            PositionalToken { source: uws, offset: 59, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 60, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 61, length: 25, token: Token::Word(Word::Emoji("family_man_woman_boy_boy")) },
+            PositionalToken { source: uws, offset: 86, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 87, length: 4, token: Token::Word(Word::Emoji("brain")) },
+            PositionalToken { source: uws, offset: 91, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             ];
         
-        let lib_res = uws.into_tokens_with_options(Default::default()).collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(Default::default()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
         //print_result(&lib_res); panic!();
     }
@@ -1571,57 +1027,57 @@ mod test {
     fn hashtags_mentions_urls() {
         let uws = "\nSome ##text with #hashtags and @other components\nadfa wdsfdf asdf asd http://asdfasdfsd.com/fasdfd/sadfsadf/sdfas/12312_12414/asdf?fascvx=fsfwer&dsdfasdf=fasdf#fasdf asdfa sdfa sdf\nasdfas df asd who@bla-bla.com asdfas df asdfsd\n";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 1, length: 4, token: Token::Word("Some".to_string()) },
-            PositionalToken { source: uws, offset: 5, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 6, length: 2, token: Token::Punctuation("##".to_string()) },
-            PositionalToken { source: uws, offset: 8, length: 4, token: Token::Word("text".to_string()) },
-            PositionalToken { source: uws, offset: 12, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 13, length: 4, token: Token::Word("with".to_string()) },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 18, length: 9, token: Token::Hashtag("hashtags".to_string()) },
-            PositionalToken { source: uws, offset: 27, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 28, length: 3, token: Token::Word("and".to_string()) },
-            PositionalToken { source: uws, offset: 31, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 32, length: 6, token: Token::Mention("other".to_string()) },
-            PositionalToken { source: uws, offset: 38, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 39, length: 10, token: Token::Word("components".to_string()) },
-            PositionalToken { source: uws, offset: 49, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 50, length: 4, token: Token::Word("adfa".to_string()) },
-            PositionalToken { source: uws, offset: 54, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 55, length: 6, token: Token::Word("wdsfdf".to_string()) },
-            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 62, length: 4, token: Token::Word("asdf".to_string()) },
-            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 67, length: 3, token: Token::Word("asd".to_string()) },
-            PositionalToken { source: uws, offset: 70, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 71, length: 95, token: Token::Url("http://asdfasdfsd.com/fasdfd/sadfsadf/sdfas/12312_12414/asdf?fascvx=fsfwer&dsdfasdf=fasdf#fasdf".to_string()) },
-            PositionalToken { source: uws, offset: 166, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 167, length: 5, token: Token::Word("asdfa".to_string()) },
-            PositionalToken { source: uws, offset: 172, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 173, length: 4, token: Token::Word("sdfa".to_string()) },
-            PositionalToken { source: uws, offset: 177, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 178, length: 3, token: Token::Word("sdf".to_string()) },
-            PositionalToken { source: uws, offset: 181, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 182, length: 6, token: Token::Word("asdfas".to_string()) },
-            PositionalToken { source: uws, offset: 188, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 189, length: 2, token: Token::Word("df".to_string()) },
-            PositionalToken { source: uws, offset: 191, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 192, length: 3, token: Token::Word("asd".to_string()) },
-            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 196, length: 3, token: Token::Word("who".to_string()) },
-            PositionalToken { source: uws, offset: 199, length: 4, token: Token::Mention("bla".to_string()) },
-            PositionalToken { source: uws, offset: 203, length: 1, token: Token::Punctuation("-".to_string()) },
-            PositionalToken { source: uws, offset: 204, length: 7, token: Token::Word("bla.com".to_string()) },
-            PositionalToken { source: uws, offset: 211, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 212, length: 6, token: Token::Word("asdfas".to_string()) },
-            PositionalToken { source: uws, offset: 218, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 219, length: 2, token: Token::Word("df".to_string()) },
-            PositionalToken { source: uws, offset: 221, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 222, length: 6, token: Token::Word("asdfsd".to_string()) },
-            PositionalToken { source: uws, offset: 228, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { source: uws, offset: 0, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 1, length: 4, token: Token::Word(Word::Word("Some".to_string())) },
+            PositionalToken { source: uws, offset: 5, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 6, length: 2, token: Token::Special(Special::Punctuation("##".to_string())) },
+            PositionalToken { source: uws, offset: 8, length: 4, token: Token::Word(Word::Word("text".to_string())) },
+            PositionalToken { source: uws, offset: 12, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 13, length: 4, token: Token::Word(Word::Word("with".to_string())) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 18, length: 9, token: Token::Struct(Struct::Hashtag("hashtags".to_string())) },
+            PositionalToken { source: uws, offset: 27, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 28, length: 3, token: Token::Word(Word::Word("and".to_string())) },
+            PositionalToken { source: uws, offset: 31, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 32, length: 6, token: Token::Struct(Struct::Mention("other".to_string())) },
+            PositionalToken { source: uws, offset: 38, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 39, length: 10, token: Token::Word(Word::Word("components".to_string())) },
+            PositionalToken { source: uws, offset: 49, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 50, length: 4, token: Token::Word(Word::Word("adfa".to_string())) },
+            PositionalToken { source: uws, offset: 54, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 55, length: 6, token: Token::Word(Word::Word("wdsfdf".to_string())) },
+            PositionalToken { source: uws, offset: 61, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 62, length: 4, token: Token::Word(Word::Word("asdf".to_string())) },
+            PositionalToken { source: uws, offset: 66, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 67, length: 3, token: Token::Word(Word::Word("asd".to_string())) },
+            PositionalToken { source: uws, offset: 70, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 71, length: 95, token: Token::Struct(Struct::Url("http://asdfasdfsd.com/fasdfd/sadfsadf/sdfas/12312_12414/asdf?fascvx=fsfwer&dsdfasdf=fasdf#fasdf".to_string())) },
+            PositionalToken { source: uws, offset: 166, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 167, length: 5, token: Token::Word(Word::Word("asdfa".to_string())) },
+            PositionalToken { source: uws, offset: 172, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 173, length: 4, token: Token::Word(Word::Word("sdfa".to_string())) },
+            PositionalToken { source: uws, offset: 177, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 178, length: 3, token: Token::Word(Word::Word("sdf".to_string())) },
+            PositionalToken { source: uws, offset: 181, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 182, length: 6, token: Token::Word(Word::Word("asdfas".to_string())) },
+            PositionalToken { source: uws, offset: 188, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 189, length: 2, token: Token::Word(Word::Word("df".to_string())) },
+            PositionalToken { source: uws, offset: 191, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 192, length: 3, token: Token::Word(Word::Word("asd".to_string())) },
+            PositionalToken { source: uws, offset: 195, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 196, length: 3, token: Token::Word(Word::Word("who".to_string())) },
+            PositionalToken { source: uws, offset: 199, length: 4, token: Token::Struct(Struct::Mention("bla".to_string())) },
+            PositionalToken { source: uws, offset: 203, length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+            PositionalToken { source: uws, offset: 204, length: 7, token: Token::Word(Word::Word("bla.com".to_string())) },
+            PositionalToken { source: uws, offset: 211, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 212, length: 6, token: Token::Word(Word::Word("asdfas".to_string())) },
+            PositionalToken { source: uws, offset: 218, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 219, length: 2, token: Token::Word(Word::Word("df".to_string())) },
+            PositionalToken { source: uws, offset: 221, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 222, length: 6, token: Token::Word(Word::Word("asdfsd".to_string())) },
+            PositionalToken { source: uws, offset: 228, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             ];
-        let lib_res = uws.complex_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::complex()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
         //print_result(&lib_res); panic!("")
     }*/
@@ -1631,161 +1087,161 @@ mod test {
         let uws = "[Oxana Putan|1712640565] shared a [post|100001150683379_1873048549410150]. \nAndrew\n[link|https://www.facebook.com/100001150683379/posts/1873048549410150]\nДрузья мои, издатели, редакторы, просветители, культуртрегеры, субъекты мирового рынка и ту хум ит ещё мей консёрн.\nНа текущий момент я лишен былой подвижности, хоть и ковыляю по больничных коридорам по разным нуждам и за кипятком.\nВрачи обещают мне заживление отверстых ран моих в течение полугода и на этот период можно предполагать с уверенностью преимущественно домашний образ жизни.\n[|]";
         let result = vec![
             PositionalToken { offset: 0, length: 24, token: Token::BBCode { left: vec![
-                PositionalToken { offset: 1, length: 5, token: Token::Word("Oxana".to_string()) },
-                PositionalToken { offset: 6, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { offset: 7, length: 5, token: Token::Word("Putan".to_string()) },
+                PositionalToken { offset: 1, length: 5, token: Token::Word(Word::Word("Oxana".to_string())) },
+                PositionalToken { offset: 6, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { offset: 7, length: 5, token: Token::Word(Word::Word("Putan".to_string())) },
                 ], right: vec![
-                PositionalToken { offset: 13, length: 10, token: Token::Number(Number::Integer(1712640565)) },
+                PositionalToken { offset: 13, length: 10, token: Token::Word(Word::Number(Number::Integer(1712640565))) },
                 ] } },
-            PositionalToken { offset: 24, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 25, length: 6, token: Token::Word("shared".to_string()) },
-            PositionalToken { offset: 31, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 32, length: 1, token: Token::Word("a".to_string()) },
-            PositionalToken { offset: 33, length: 1, token: Token::Separator(Separator::Space) },
+            PositionalToken { offset: 24, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 25, length: 6, token: Token::Word(Word::Word("shared".to_string())) },
+            PositionalToken { offset: 31, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 32, length: 1, token: Token::Word(Word::Word("a".to_string())) },
+            PositionalToken { offset: 33, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { offset: 34, length: 39, token: Token::BBCode { left: vec![
-                PositionalToken { offset: 35, length: 4, token: Token::Word("post".to_string()) },
+                PositionalToken { offset: 35, length: 4, token: Token::Word(Word::Word("post".to_string())) },
                 ], right: vec![
-                PositionalToken { offset: 40, length: 32, token: Token::Numerical(Numerical::Alphanumeric("100001150683379_1873048549410150".to_string())) },
+                PositionalToken { offset: 40, length: 32, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("100001150683379_1873048549410150".to_string()))) },
                 ] } },
-            PositionalToken { offset: 73, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { offset: 74, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 75, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { offset: 76, length: 6, token: Token::Word("Andrew".to_string()) },
-            PositionalToken { offset: 82, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { offset: 73, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { offset: 74, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 75, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 76, length: 6, token: Token::Word(Word::Word("Andrew".to_string())) },
+            PositionalToken { offset: 82, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             PositionalToken { offset: 83, length: 70, token: Token::BBCode { left: vec![
-                PositionalToken { offset: 84, length: 4, token: Token::Word("link".to_string()) },
+                PositionalToken { offset: 84, length: 4, token: Token::Word(Word::Word("link".to_string())) },
                 ], right: vec![
-                PositionalToken { offset: 89, length: 63, token: Token::Url("https://www.facebook.com/100001150683379/posts/1873048549410150".to_string()) },
+                PositionalToken { offset: 89, length: 63, token: Token::Struct(Struct::Url("https://www.facebook.com/100001150683379/posts/1873048549410150".to_string())) },
                 ] } },
-            PositionalToken { offset: 153, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { offset: 154, length: 12, token: Token::Word("Друзья".to_string()) },
-            PositionalToken { offset: 166, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 167, length: 6, token: Token::Word("мои".to_string()) },
-            PositionalToken { offset: 173, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { offset: 174, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 175, length: 16, token: Token::Word("издатели".to_string()) },
-            PositionalToken { offset: 191, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { offset: 192, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 193, length: 18, token: Token::Word("редакторы".to_string()) },
-            PositionalToken { offset: 211, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { offset: 212, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 213, length: 24, token: Token::Word("просветители".to_string()) },
-            PositionalToken { offset: 237, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { offset: 238, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 239, length: 28, token: Token::Word("культуртрегеры".to_string()) },
-            PositionalToken { offset: 267, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { offset: 268, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 269, length: 16, token: Token::Word("субъекты".to_string()) },
-            PositionalToken { offset: 285, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 286, length: 16, token: Token::Word("мирового".to_string()) },
-            PositionalToken { offset: 302, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 303, length: 10, token: Token::Word("рынка".to_string()) },
-            PositionalToken { offset: 313, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 314, length: 2, token: Token::Word("и".to_string()) },
-            PositionalToken { offset: 316, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 317, length: 4, token: Token::Word("ту".to_string()) },
-            PositionalToken { offset: 321, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 322, length: 6, token: Token::Word("хум".to_string()) },
-            PositionalToken { offset: 328, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 329, length: 4, token: Token::Word("ит".to_string()) },
-            PositionalToken { offset: 333, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 334, length: 6, token: Token::Word("ещё".to_string()) },
-            PositionalToken { offset: 340, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 341, length: 6, token: Token::Word("мей".to_string()) },
-            PositionalToken { offset: 347, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 348, length: 14, token: Token::Word("консёрн".to_string()) },
-            PositionalToken { offset: 362, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { offset: 363, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { offset: 364, length: 4, token: Token::Word("На".to_string()) },
-            PositionalToken { offset: 368, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 369, length: 14, token: Token::Word("текущий".to_string()) },
-            PositionalToken { offset: 383, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 384, length: 12, token: Token::Word("момент".to_string()) },
-            PositionalToken { offset: 396, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 397, length: 2, token: Token::Word("я".to_string()) },
-            PositionalToken { offset: 399, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 400, length: 10, token: Token::Word("лишен".to_string()) },
-            PositionalToken { offset: 410, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 411, length: 10, token: Token::Word("былой".to_string()) },
-            PositionalToken { offset: 421, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 422, length: 22, token: Token::Word("подвижности".to_string()) },
-            PositionalToken { offset: 444, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { offset: 445, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 446, length: 8, token: Token::Word("хоть".to_string()) },
-            PositionalToken { offset: 454, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 455, length: 2, token: Token::Word("и".to_string()) },
-            PositionalToken { offset: 457, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 458, length: 14, token: Token::Word("ковыляю".to_string()) },
-            PositionalToken { offset: 472, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 473, length: 4, token: Token::Word("по".to_string()) },
-            PositionalToken { offset: 477, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 478, length: 20, token: Token::Word("больничных".to_string()) },
-            PositionalToken { offset: 498, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 499, length: 18, token: Token::Word("коридорам".to_string()) },
-            PositionalToken { offset: 517, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 518, length: 4, token: Token::Word("по".to_string()) },
-            PositionalToken { offset: 522, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 523, length: 12, token: Token::Word("разным".to_string()) },
-            PositionalToken { offset: 535, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 536, length: 12, token: Token::Word("нуждам".to_string()) },
-            PositionalToken { offset: 548, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 549, length: 2, token: Token::Word("и".to_string()) },
-            PositionalToken { offset: 551, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 552, length: 4, token: Token::Word("за".to_string()) },
-            PositionalToken { offset: 556, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 557, length: 16, token: Token::Word("кипятком".to_string()) },
-            PositionalToken { offset: 573, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { offset: 574, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { offset: 575, length: 10, token: Token::Word("Врачи".to_string()) },
-            PositionalToken { offset: 585, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 586, length: 14, token: Token::Word("обещают".to_string()) },
-            PositionalToken { offset: 600, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 601, length: 6, token: Token::Word("мне".to_string()) },
-            PositionalToken { offset: 607, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 608, length: 20, token: Token::Word("заживление".to_string()) },
-            PositionalToken { offset: 628, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 629, length: 18, token: Token::Word("отверстых".to_string()) },
-            PositionalToken { offset: 647, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 648, length: 6, token: Token::Word("ран".to_string()) },
-            PositionalToken { offset: 654, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 655, length: 8, token: Token::Word("моих".to_string()) },
-            PositionalToken { offset: 663, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 664, length: 2, token: Token::Word("в".to_string()) },
-            PositionalToken { offset: 666, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 667, length: 14, token: Token::Word("течение".to_string()) },
-            PositionalToken { offset: 681, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 682, length: 16, token: Token::Word("полугода".to_string()) },
-            PositionalToken { offset: 698, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 699, length: 2, token: Token::Word("и".to_string()) },
-            PositionalToken { offset: 701, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 702, length: 4, token: Token::Word("на".to_string()) },
-            PositionalToken { offset: 706, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 707, length: 8, token: Token::Word("этот".to_string()) },
-            PositionalToken { offset: 715, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 716, length: 12, token: Token::Word("период".to_string()) },
-            PositionalToken { offset: 728, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 729, length: 10, token: Token::Word("можно".to_string()) },
-            PositionalToken { offset: 739, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 740, length: 24, token: Token::Word("предполагать".to_string()) },
-            PositionalToken { offset: 764, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 765, length: 2, token: Token::Word("с".to_string()) },
-            PositionalToken { offset: 767, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 768, length: 24, token: Token::Word("уверенностью".to_string()) },
-            PositionalToken { offset: 792, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 793, length: 30, token: Token::Word("преимущественно".to_string()) },
-            PositionalToken { offset: 823, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 824, length: 16, token: Token::Word("домашний".to_string()) },
-            PositionalToken { offset: 840, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 841, length: 10, token: Token::Word("образ".to_string()) },
-            PositionalToken { offset: 851, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 852, length: 10, token: Token::Word("жизни".to_string()) },
-            PositionalToken { offset: 862, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { offset: 863, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { offset: 153, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 154, length: 12, token: Token::Word(Word::Word("Друзья".to_string())) },
+            PositionalToken { offset: 166, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 167, length: 6, token: Token::Word(Word::Word("мои".to_string())) },
+            PositionalToken { offset: 173, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { offset: 174, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 175, length: 16, token: Token::Word(Word::Word("издатели".to_string())) },
+            PositionalToken { offset: 191, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { offset: 192, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 193, length: 18, token: Token::Word(Word::Word("редакторы".to_string())) },
+            PositionalToken { offset: 211, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { offset: 212, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 213, length: 24, token: Token::Word(Word::Word("просветители".to_string())) },
+            PositionalToken { offset: 237, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { offset: 238, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 239, length: 28, token: Token::Word(Word::Word("культуртрегеры".to_string())) },
+            PositionalToken { offset: 267, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { offset: 268, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 269, length: 16, token: Token::Word(Word::Word("субъекты".to_string())) },
+            PositionalToken { offset: 285, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 286, length: 16, token: Token::Word(Word::Word("мирового".to_string())) },
+            PositionalToken { offset: 302, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 303, length: 10, token: Token::Word(Word::Word("рынка".to_string())) },
+            PositionalToken { offset: 313, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 314, length: 2, token: Token::Word(Word::Word("и".to_string())) },
+            PositionalToken { offset: 316, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 317, length: 4, token: Token::Word(Word::Word("ту".to_string())) },
+            PositionalToken { offset: 321, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 322, length: 6, token: Token::Word(Word::Word("хум".to_string())) },
+            PositionalToken { offset: 328, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 329, length: 4, token: Token::Word(Word::Word("ит".to_string())) },
+            PositionalToken { offset: 333, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 334, length: 6, token: Token::Word(Word::Word("ещё".to_string())) },
+            PositionalToken { offset: 340, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 341, length: 6, token: Token::Word(Word::Word("мей".to_string())) },
+            PositionalToken { offset: 347, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 348, length: 14, token: Token::Word(Word::Word("консёрн".to_string())) },
+            PositionalToken { offset: 362, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { offset: 363, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 364, length: 4, token: Token::Word(Word::Word("На".to_string())) },
+            PositionalToken { offset: 368, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 369, length: 14, token: Token::Word(Word::Word("текущий".to_string())) },
+            PositionalToken { offset: 383, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 384, length: 12, token: Token::Word(Word::Word("момент".to_string())) },
+            PositionalToken { offset: 396, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 397, length: 2, token: Token::Word(Word::Word("я".to_string())) },
+            PositionalToken { offset: 399, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 400, length: 10, token: Token::Word(Word::Word("лишен".to_string())) },
+            PositionalToken { offset: 410, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 411, length: 10, token: Token::Word(Word::Word("былой".to_string())) },
+            PositionalToken { offset: 421, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 422, length: 22, token: Token::Word(Word::Word("подвижности".to_string())) },
+            PositionalToken { offset: 444, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { offset: 445, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 446, length: 8, token: Token::Word(Word::Word("хоть".to_string())) },
+            PositionalToken { offset: 454, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 455, length: 2, token: Token::Word(Word::Word("и".to_string())) },
+            PositionalToken { offset: 457, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 458, length: 14, token: Token::Word(Word::Word("ковыляю".to_string())) },
+            PositionalToken { offset: 472, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 473, length: 4, token: Token::Word(Word::Word("по".to_string())) },
+            PositionalToken { offset: 477, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 478, length: 20, token: Token::Word(Word::Word("больничных".to_string())) },
+            PositionalToken { offset: 498, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 499, length: 18, token: Token::Word(Word::Word("коридорам".to_string())) },
+            PositionalToken { offset: 517, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 518, length: 4, token: Token::Word(Word::Word("по".to_string())) },
+            PositionalToken { offset: 522, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 523, length: 12, token: Token::Word(Word::Word("разным".to_string())) },
+            PositionalToken { offset: 535, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 536, length: 12, token: Token::Word(Word::Word("нуждам".to_string())) },
+            PositionalToken { offset: 548, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 549, length: 2, token: Token::Word(Word::Word("и".to_string())) },
+            PositionalToken { offset: 551, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 552, length: 4, token: Token::Word(Word::Word("за".to_string())) },
+            PositionalToken { offset: 556, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 557, length: 16, token: Token::Word(Word::Word("кипятком".to_string())) },
+            PositionalToken { offset: 573, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { offset: 574, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 575, length: 10, token: Token::Word(Word::Word("Врачи".to_string())) },
+            PositionalToken { offset: 585, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 586, length: 14, token: Token::Word(Word::Word("обещают".to_string())) },
+            PositionalToken { offset: 600, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 601, length: 6, token: Token::Word(Word::Word("мне".to_string())) },
+            PositionalToken { offset: 607, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 608, length: 20, token: Token::Word(Word::Word("заживление".to_string())) },
+            PositionalToken { offset: 628, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 629, length: 18, token: Token::Word(Word::Word("отверстых".to_string())) },
+            PositionalToken { offset: 647, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 648, length: 6, token: Token::Word(Word::Word("ран".to_string())) },
+            PositionalToken { offset: 654, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 655, length: 8, token: Token::Word(Word::Word("моих".to_string())) },
+            PositionalToken { offset: 663, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 664, length: 2, token: Token::Word(Word::Word("в".to_string())) },
+            PositionalToken { offset: 666, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 667, length: 14, token: Token::Word(Word::Word("течение".to_string())) },
+            PositionalToken { offset: 681, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 682, length: 16, token: Token::Word(Word::Word("полугода".to_string())) },
+            PositionalToken { offset: 698, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 699, length: 2, token: Token::Word(Word::Word("и".to_string())) },
+            PositionalToken { offset: 701, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 702, length: 4, token: Token::Word(Word::Word("на".to_string())) },
+            PositionalToken { offset: 706, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 707, length: 8, token: Token::Word(Word::Word("этот".to_string())) },
+            PositionalToken { offset: 715, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 716, length: 12, token: Token::Word(Word::Word("период".to_string())) },
+            PositionalToken { offset: 728, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 729, length: 10, token: Token::Word(Word::Word("можно".to_string())) },
+            PositionalToken { offset: 739, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 740, length: 24, token: Token::Word(Word::Word("предполагать".to_string())) },
+            PositionalToken { offset: 764, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 765, length: 2, token: Token::Word(Word::Word("с".to_string())) },
+            PositionalToken { offset: 767, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 768, length: 24, token: Token::Word(Word::Word("уверенностью".to_string())) },
+            PositionalToken { offset: 792, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 793, length: 30, token: Token::Word(Word::Word("преимущественно".to_string())) },
+            PositionalToken { offset: 823, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 824, length: 16, token: Token::Word(Word::Word("домашний".to_string())) },
+            PositionalToken { offset: 840, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 841, length: 10, token: Token::Word(Word::Word("образ".to_string())) },
+            PositionalToken { offset: 851, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 852, length: 10, token: Token::Word(Word::Word("жизни".to_string())) },
+            PositionalToken { offset: 862, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { offset: 863, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             PositionalToken { offset: 864, length: 3, token: Token::BBCode { left: vec![
                 ], right: vec![
                 ] } },
             ];
-        let lib_res = uws.complex_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::complex()).collect::<Vec<_>>();
         //print_result(&lib_res); panic!("");
         check_results(&result,&lib_res,uws);        
     }*/
@@ -1795,200 +1251,200 @@ mod test {
     fn html() {
         let uws = "<div class=\"article article_view \" id=\"article_view_-113039156_9551\" data-article-url=\"/@chaibuket-o-chem-ne-zabyt-25-noyabrya\" data-audio-context=\"article:-113039156_9551\"><h1  class=\"article_decoration_first article_decoration_last\" >День Мамы </h1><p  class=\"article_decoration_first article_decoration_last\" >День, когда поздравляют мам, бабушек, сестер и жён — это всемирный праздник, называемый «День Мамы». В настоящее время его отмечают почти в каждой стране, просто везде разные даты и способы празднования. </p><h3  class=\"article_decoration_first article_decoration_last\" ><span class='article_anchor_title'>\n  <span class='article_anchor_button' id='pochemu-my-ego-prazdnuem'></span>\n  <span class='article_anchor_fsymbol'>П</span>\n</span>ПОЧЕМУ МЫ ЕГО ПРАЗДНУЕМ</h3><p  class=\"article_decoration_first article_decoration_last article_decoration_before\" >В 1987 году комитет госдумы по делам женщин, семьи и молодежи выступил с предложением учредить «День мамы», а сам приказ был подписан уже 30 января 1988 года Борисом Ельциным. Было решено, что ежегодно в России празднество дня мамы будет выпадать на последнее воскресенье ноября. </p><figure data-type=\"101\" data-mode=\"\"  class=\"article_decoration_first article_decoration_last\" >\n  <div class=\"article_figure_content\" style=\"width: 1125px\">\n    <div class=\"article_figure_sizer_content\"><div class=\"article_object_sizer_wrap\" data-sizes=\"[{&quot;s&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c0ffd/pcNJaBH3NDo.jpg&quot;,75,50],&quot;m&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c0ffe/ozCLs2kHtRY.jpg&quot;,130,87],&quot;x&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c0fff/E4KtTNDydzE.jpg&quot;,604,403],&quot;y&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c1000/1nLxpYKavzU.jpg&quot;,807,538],&quot;z&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c1001/IgEODe90yEk.jpg&quot;,1125,750],&quot;o&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c1002/01faNwVZ2_E.jpg&quot;,130,87],&quot;p&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c1003/baDFzbdRP2s.jpg&quot;,200,133],&quot;q&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c1004/CY4khI6KJKA.jpg&quot;,320,213],&quot;r&quot;:[&quot;https://pp.userapi.com/c849128/v849128704/c1005/NOvAJ6-VltY.jpg&quot;,510,340]}]\">\n  <img class=\"article_object_sizer_inner article_object_photo__image_blur\" src=\"https://pp.userapi.com/c849128/v849128704/c0ffd/pcNJaBH3NDo.jpg\" data-baseurl=\"\"/>\n  \n</div></div>\n    <div class=\"article_figure_sizer\" style=\"padding-bottom: 66.666666666667%\"></div>";
         let result = vec![
-            PositionalToken { source: uws, offset: 236, length: 8, token: Token::Word("День".to_string()) },
-            PositionalToken { source: uws, offset: 244, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 245, length: 8, token: Token::Word("Мамы".to_string()) },
-            PositionalToken { source: uws, offset: 253, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 321, length: 8, token: Token::Word("День".to_string()) },
-            PositionalToken { source: uws, offset: 329, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 330, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 331, length: 10, token: Token::Word("когда".to_string()) },
-            PositionalToken { source: uws, offset: 341, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 342, length: 22, token: Token::Word("поздравляют".to_string()) },
-            PositionalToken { source: uws, offset: 364, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 365, length: 6, token: Token::Word("мам".to_string()) },
-            PositionalToken { source: uws, offset: 371, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 372, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 373, length: 14, token: Token::Word("бабушек".to_string()) },
-            PositionalToken { source: uws, offset: 387, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 388, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 389, length: 12, token: Token::Word("сестер".to_string()) },
-            PositionalToken { source: uws, offset: 401, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 402, length: 2, token: Token::Word("и".to_string()) },
-            PositionalToken { source: uws, offset: 404, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 405, length: 6, token: Token::Word("жён".to_string()) },
-            PositionalToken { source: uws, offset: 411, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 412, length: 3, token: Token::Punctuation("—".to_string()) },
-            PositionalToken { source: uws, offset: 415, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 416, length: 6, token: Token::Word("это".to_string()) },
-            PositionalToken { source: uws, offset: 422, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 423, length: 18, token: Token::Word("всемирный".to_string()) },
-            PositionalToken { source: uws, offset: 441, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 442, length: 16, token: Token::Word("праздник".to_string()) },
-            PositionalToken { source: uws, offset: 458, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 459, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 460, length: 20, token: Token::Word("называемый".to_string()) },
-            PositionalToken { source: uws, offset: 480, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 481, length: 2, token: Token::Punctuation("«".to_string()) },
-            PositionalToken { source: uws, offset: 483, length: 8, token: Token::Word("День".to_string()) },
-            PositionalToken { source: uws, offset: 491, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 492, length: 8, token: Token::Word("Мамы".to_string()) },
-            PositionalToken { source: uws, offset: 500, length: 2, token: Token::Punctuation("»".to_string()) },
-            PositionalToken { source: uws, offset: 502, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 503, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 504, length: 2, token: Token::Word("В".to_string()) },
-            PositionalToken { source: uws, offset: 506, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 507, length: 18, token: Token::Word("настоящее".to_string()) },
-            PositionalToken { source: uws, offset: 525, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 526, length: 10, token: Token::Word("время".to_string()) },
-            PositionalToken { source: uws, offset: 536, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 537, length: 6, token: Token::Word("его".to_string()) },
-            PositionalToken { source: uws, offset: 543, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 544, length: 16, token: Token::Word("отмечают".to_string()) },
-            PositionalToken { source: uws, offset: 560, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 561, length: 10, token: Token::Word("почти".to_string()) },
-            PositionalToken { source: uws, offset: 571, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 572, length: 2, token: Token::Word("в".to_string()) },
-            PositionalToken { source: uws, offset: 574, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 575, length: 12, token: Token::Word("каждой".to_string()) },
-            PositionalToken { source: uws, offset: 587, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 588, length: 12, token: Token::Word("стране".to_string()) },
-            PositionalToken { source: uws, offset: 600, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 601, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 602, length: 12, token: Token::Word("просто".to_string()) },
-            PositionalToken { source: uws, offset: 614, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 615, length: 10, token: Token::Word("везде".to_string()) },
-            PositionalToken { source: uws, offset: 625, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 626, length: 12, token: Token::Word("разные".to_string()) },
-            PositionalToken { source: uws, offset: 638, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 639, length: 8, token: Token::Word("даты".to_string()) },
-            PositionalToken { source: uws, offset: 647, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 648, length: 2, token: Token::Word("и".to_string()) },
-            PositionalToken { source: uws, offset: 650, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 651, length: 14, token: Token::Word("способы".to_string()) },
-            PositionalToken { source: uws, offset: 665, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 666, length: 24, token: Token::Word("празднования".to_string()) },
-            PositionalToken { source: uws, offset: 690, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 691, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 794, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 795, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 870, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 871, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 910, length: 2, token: Token::Word("П".to_string()) },
-            PositionalToken { source: uws, offset: 919, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 927, length: 12, token: Token::Word("ПОЧЕМУ".to_string()) },
-            PositionalToken { source: uws, offset: 939, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 940, length: 4, token: Token::Word("МЫ".to_string()) },
-            PositionalToken { source: uws, offset: 944, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 945, length: 6, token: Token::Word("ЕГО".to_string()) },
-            PositionalToken { source: uws, offset: 951, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 952, length: 18, token: Token::Word("ПРАЗДНУЕМ".to_string()) },
-            PositionalToken { source: uws, offset: 1063, length: 2, token: Token::Word("В".to_string()) },
-            PositionalToken { source: uws, offset: 1065, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1066, length: 4, token: Token::Number(Number::Integer(1987)) },
-            PositionalToken { source: uws, offset: 1070, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1071, length: 8, token: Token::Word("году".to_string()) },
-            PositionalToken { source: uws, offset: 1079, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1080, length: 14, token: Token::Word("комитет".to_string()) },
-            PositionalToken { source: uws, offset: 1094, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1095, length: 14, token: Token::Word("госдумы".to_string()) },
-            PositionalToken { source: uws, offset: 1109, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1110, length: 4, token: Token::Word("по".to_string()) },
-            PositionalToken { source: uws, offset: 1114, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1115, length: 10, token: Token::Word("делам".to_string()) },
-            PositionalToken { source: uws, offset: 1125, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1126, length: 12, token: Token::Word("женщин".to_string()) },
-            PositionalToken { source: uws, offset: 1138, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 1139, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1140, length: 10, token: Token::Word("семьи".to_string()) },
-            PositionalToken { source: uws, offset: 1150, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1151, length: 2, token: Token::Word("и".to_string()) },
-            PositionalToken { source: uws, offset: 1153, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1154, length: 16, token: Token::Word("молодежи".to_string()) },
-            PositionalToken { source: uws, offset: 1170, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1171, length: 16, token: Token::Word("выступил".to_string()) },
-            PositionalToken { source: uws, offset: 1187, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1188, length: 2, token: Token::Word("с".to_string()) },
-            PositionalToken { source: uws, offset: 1190, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1191, length: 24, token: Token::Word("предложением".to_string()) },
-            PositionalToken { source: uws, offset: 1215, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1216, length: 16, token: Token::Word("учредить".to_string()) },
-            PositionalToken { source: uws, offset: 1232, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1233, length: 2, token: Token::Punctuation("«".to_string()) },
-            PositionalToken { source: uws, offset: 1235, length: 8, token: Token::Word("День".to_string()) },
-            PositionalToken { source: uws, offset: 1243, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1244, length: 8, token: Token::Word("мамы".to_string()) },
-            PositionalToken { source: uws, offset: 1252, length: 2, token: Token::Punctuation("»".to_string()) },
-            PositionalToken { source: uws, offset: 1254, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 1255, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1256, length: 2, token: Token::Word("а".to_string()) },
-            PositionalToken { source: uws, offset: 1258, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1259, length: 6, token: Token::Word("сам".to_string()) },
-            PositionalToken { source: uws, offset: 1265, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1266, length: 12, token: Token::Word("приказ".to_string()) },
-            PositionalToken { source: uws, offset: 1278, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1279, length: 6, token: Token::Word("был".to_string()) },
-            PositionalToken { source: uws, offset: 1285, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1286, length: 16, token: Token::Word("подписан".to_string()) },
-            PositionalToken { source: uws, offset: 1302, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1303, length: 6, token: Token::Word("уже".to_string()) },
-            PositionalToken { source: uws, offset: 1309, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1310, length: 2, token: Token::Number(Number::Integer(30)) },
-            PositionalToken { source: uws, offset: 1312, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1313, length: 12, token: Token::Word("января".to_string()) },
-            PositionalToken { source: uws, offset: 1325, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1326, length: 4, token: Token::Number(Number::Integer(1988)) },
-            PositionalToken { source: uws, offset: 1330, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1331, length: 8, token: Token::Word("года".to_string()) },
-            PositionalToken { source: uws, offset: 1339, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1340, length: 14, token: Token::Word("Борисом".to_string()) },
-            PositionalToken { source: uws, offset: 1354, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1355, length: 16, token: Token::Word("Ельциным".to_string()) },
-            PositionalToken { source: uws, offset: 1371, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 1372, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1373, length: 8, token: Token::Word("Было".to_string()) },
-            PositionalToken { source: uws, offset: 1381, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1382, length: 12, token: Token::Word("решено".to_string()) },
-            PositionalToken { source: uws, offset: 1394, length: 1, token: Token::Punctuation(",".to_string()) },
-            PositionalToken { source: uws, offset: 1395, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1396, length: 6, token: Token::Word("что".to_string()) },
-            PositionalToken { source: uws, offset: 1402, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1403, length: 16, token: Token::Word("ежегодно".to_string()) },
-            PositionalToken { source: uws, offset: 1419, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1420, length: 2, token: Token::Word("в".to_string()) },
-            PositionalToken { source: uws, offset: 1422, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1423, length: 12, token: Token::Word("России".to_string()) },
-            PositionalToken { source: uws, offset: 1435, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1436, length: 22, token: Token::Word("празднество".to_string()) },
-            PositionalToken { source: uws, offset: 1458, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1459, length: 6, token: Token::Word("дня".to_string()) },
-            PositionalToken { source: uws, offset: 1465, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1466, length: 8, token: Token::Word("мамы".to_string()) },
-            PositionalToken { source: uws, offset: 1474, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1475, length: 10, token: Token::Word("будет".to_string()) },
-            PositionalToken { source: uws, offset: 1485, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1486, length: 16, token: Token::Word("выпадать".to_string()) },
-            PositionalToken { source: uws, offset: 1502, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1503, length: 4, token: Token::Word("на".to_string()) },
-            PositionalToken { source: uws, offset: 1507, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1508, length: 18, token: Token::Word("последнее".to_string()) },
-            PositionalToken { source: uws, offset: 1526, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1527, length: 22, token: Token::Word("воскресенье".to_string()) },
-            PositionalToken { source: uws, offset: 1549, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1550, length: 12, token: Token::Word("ноября".to_string()) },
-            PositionalToken { source: uws, offset: 1562, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 1563, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1664, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 1665, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 1725, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 1726, length: 4, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 2725, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 2726, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 2888, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 2889, length: 2, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 2891, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 2904, length: 1, token: Token::Separator(Separator::Newline) },
-            PositionalToken { source: uws, offset: 2905, length: 4, token: Token::Separator(Separator::Space) },
+            PositionalToken { source: uws, offset: 236, length: 8, token: Token::Word(Word::Word("День".to_string())) },
+            PositionalToken { source: uws, offset: 244, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 245, length: 8, token: Token::Word(Word::Word("Мамы".to_string())) },
+            PositionalToken { source: uws, offset: 253, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 321, length: 8, token: Token::Word(Word::Word("День".to_string())) },
+            PositionalToken { source: uws, offset: 329, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 330, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 331, length: 10, token: Token::Word(Word::Word("когда".to_string())) },
+            PositionalToken { source: uws, offset: 341, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 342, length: 22, token: Token::Word(Word::Word("поздравляют".to_string())) },
+            PositionalToken { source: uws, offset: 364, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 365, length: 6, token: Token::Word(Word::Word("мам".to_string())) },
+            PositionalToken { source: uws, offset: 371, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 372, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 373, length: 14, token: Token::Word(Word::Word("бабушек".to_string())) },
+            PositionalToken { source: uws, offset: 387, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 388, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 389, length: 12, token: Token::Word(Word::Word("сестер".to_string())) },
+            PositionalToken { source: uws, offset: 401, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 402, length: 2, token: Token::Word(Word::Word("и".to_string())) },
+            PositionalToken { source: uws, offset: 404, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 405, length: 6, token: Token::Word(Word::Word("жён".to_string())) },
+            PositionalToken { source: uws, offset: 411, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 412, length: 3, token: Token::Special(Special::Punctuation("—".to_string())) },
+            PositionalToken { source: uws, offset: 415, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 416, length: 6, token: Token::Word(Word::Word("это".to_string())) },
+            PositionalToken { source: uws, offset: 422, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 423, length: 18, token: Token::Word(Word::Word("всемирный".to_string())) },
+            PositionalToken { source: uws, offset: 441, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 442, length: 16, token: Token::Word(Word::Word("праздник".to_string())) },
+            PositionalToken { source: uws, offset: 458, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 459, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 460, length: 20, token: Token::Word(Word::Word("называемый".to_string())) },
+            PositionalToken { source: uws, offset: 480, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 481, length: 2, token: Token::Special(Special::Punctuation("«".to_string())) },
+            PositionalToken { source: uws, offset: 483, length: 8, token: Token::Word(Word::Word("День".to_string())) },
+            PositionalToken { source: uws, offset: 491, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 492, length: 8, token: Token::Word(Word::Word("Мамы".to_string())) },
+            PositionalToken { source: uws, offset: 500, length: 2, token: Token::Special(Special::Punctuation("»".to_string())) },
+            PositionalToken { source: uws, offset: 502, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 503, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 504, length: 2, token: Token::Word(Word::Word("В".to_string())) },
+            PositionalToken { source: uws, offset: 506, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 507, length: 18, token: Token::Word(Word::Word("настоящее".to_string())) },
+            PositionalToken { source: uws, offset: 525, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 526, length: 10, token: Token::Word(Word::Word("время".to_string())) },
+            PositionalToken { source: uws, offset: 536, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 537, length: 6, token: Token::Word(Word::Word("его".to_string())) },
+            PositionalToken { source: uws, offset: 543, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 544, length: 16, token: Token::Word(Word::Word("отмечают".to_string())) },
+            PositionalToken { source: uws, offset: 560, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 561, length: 10, token: Token::Word(Word::Word("почти".to_string())) },
+            PositionalToken { source: uws, offset: 571, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 572, length: 2, token: Token::Word(Word::Word("в".to_string())) },
+            PositionalToken { source: uws, offset: 574, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 575, length: 12, token: Token::Word(Word::Word("каждой".to_string())) },
+            PositionalToken { source: uws, offset: 587, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 588, length: 12, token: Token::Word(Word::Word("стране".to_string())) },
+            PositionalToken { source: uws, offset: 600, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 601, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 602, length: 12, token: Token::Word(Word::Word("просто".to_string())) },
+            PositionalToken { source: uws, offset: 614, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 615, length: 10, token: Token::Word(Word::Word("везде".to_string())) },
+            PositionalToken { source: uws, offset: 625, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 626, length: 12, token: Token::Word(Word::Word("разные".to_string())) },
+            PositionalToken { source: uws, offset: 638, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 639, length: 8, token: Token::Word(Word::Word("даты".to_string())) },
+            PositionalToken { source: uws, offset: 647, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 648, length: 2, token: Token::Word(Word::Word("и".to_string())) },
+            PositionalToken { source: uws, offset: 650, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 651, length: 14, token: Token::Word(Word::Word("способы".to_string())) },
+            PositionalToken { source: uws, offset: 665, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 666, length: 24, token: Token::Word(Word::Word("празднования".to_string())) },
+            PositionalToken { source: uws, offset: 690, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 691, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 794, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 795, length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 870, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 871, length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 910, length: 2, token: Token::Word(Word::Word("П".to_string())) },
+            PositionalToken { source: uws, offset: 919, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 927, length: 12, token: Token::Word(Word::Word("ПОЧЕМУ".to_string())) },
+            PositionalToken { source: uws, offset: 939, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 940, length: 4, token: Token::Word(Word::Word("МЫ".to_string())) },
+            PositionalToken { source: uws, offset: 944, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 945, length: 6, token: Token::Word(Word::Word("ЕГО".to_string())) },
+            PositionalToken { source: uws, offset: 951, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 952, length: 18, token: Token::Word(Word::Word("ПРАЗДНУЕМ".to_string())) },
+            PositionalToken { source: uws, offset: 1063, length: 2, token: Token::Word(Word::Word("В".to_string())) },
+            PositionalToken { source: uws, offset: 1065, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1066, length: 4, token: Token::Word(Word::Number(Number::Integer(1987))) },
+            PositionalToken { source: uws, offset: 1070, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1071, length: 8, token: Token::Word(Word::Word("году".to_string())) },
+            PositionalToken { source: uws, offset: 1079, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1080, length: 14, token: Token::Word(Word::Word("комитет".to_string())) },
+            PositionalToken { source: uws, offset: 1094, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1095, length: 14, token: Token::Word(Word::Word("госдумы".to_string())) },
+            PositionalToken { source: uws, offset: 1109, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1110, length: 4, token: Token::Word(Word::Word("по".to_string())) },
+            PositionalToken { source: uws, offset: 1114, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1115, length: 10, token: Token::Word(Word::Word("делам".to_string())) },
+            PositionalToken { source: uws, offset: 1125, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1126, length: 12, token: Token::Word(Word::Word("женщин".to_string())) },
+            PositionalToken { source: uws, offset: 1138, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 1139, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1140, length: 10, token: Token::Word(Word::Word("семьи".to_string())) },
+            PositionalToken { source: uws, offset: 1150, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1151, length: 2, token: Token::Word(Word::Word("и".to_string())) },
+            PositionalToken { source: uws, offset: 1153, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1154, length: 16, token: Token::Word(Word::Word("молодежи".to_string())) },
+            PositionalToken { source: uws, offset: 1170, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1171, length: 16, token: Token::Word(Word::Word("выступил".to_string())) },
+            PositionalToken { source: uws, offset: 1187, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1188, length: 2, token: Token::Word(Word::Word("с".to_string())) },
+            PositionalToken { source: uws, offset: 1190, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1191, length: 24, token: Token::Word(Word::Word("предложением".to_string())) },
+            PositionalToken { source: uws, offset: 1215, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1216, length: 16, token: Token::Word(Word::Word("учредить".to_string())) },
+            PositionalToken { source: uws, offset: 1232, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1233, length: 2, token: Token::Special(Special::Punctuation("«".to_string())) },
+            PositionalToken { source: uws, offset: 1235, length: 8, token: Token::Word(Word::Word("День".to_string())) },
+            PositionalToken { source: uws, offset: 1243, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1244, length: 8, token: Token::Word(Word::Word("мамы".to_string())) },
+            PositionalToken { source: uws, offset: 1252, length: 2, token: Token::Special(Special::Punctuation("»".to_string())) },
+            PositionalToken { source: uws, offset: 1254, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 1255, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1256, length: 2, token: Token::Word(Word::Word("а".to_string())) },
+            PositionalToken { source: uws, offset: 1258, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1259, length: 6, token: Token::Word(Word::Word("сам".to_string())) },
+            PositionalToken { source: uws, offset: 1265, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1266, length: 12, token: Token::Word(Word::Word("приказ".to_string())) },
+            PositionalToken { source: uws, offset: 1278, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1279, length: 6, token: Token::Word(Word::Word("был".to_string())) },
+            PositionalToken { source: uws, offset: 1285, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1286, length: 16, token: Token::Word(Word::Word("подписан".to_string())) },
+            PositionalToken { source: uws, offset: 1302, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1303, length: 6, token: Token::Word(Word::Word("уже".to_string())) },
+            PositionalToken { source: uws, offset: 1309, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1310, length: 2, token: Token::Word(Word::Number(Number::Integer(30))) },
+            PositionalToken { source: uws, offset: 1312, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1313, length: 12, token: Token::Word(Word::Word("января".to_string())) },
+            PositionalToken { source: uws, offset: 1325, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1326, length: 4, token: Token::Word(Word::Number(Number::Integer(1988))) },
+            PositionalToken { source: uws, offset: 1330, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1331, length: 8, token: Token::Word(Word::Word("года".to_string())) },
+            PositionalToken { source: uws, offset: 1339, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1340, length: 14, token: Token::Word(Word::Word("Борисом".to_string())) },
+            PositionalToken { source: uws, offset: 1354, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1355, length: 16, token: Token::Word(Word::Word("Ельциным".to_string())) },
+            PositionalToken { source: uws, offset: 1371, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 1372, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1373, length: 8, token: Token::Word(Word::Word("Было".to_string())) },
+            PositionalToken { source: uws, offset: 1381, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1382, length: 12, token: Token::Word(Word::Word("решено".to_string())) },
+            PositionalToken { source: uws, offset: 1394, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+            PositionalToken { source: uws, offset: 1395, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1396, length: 6, token: Token::Word(Word::Word("что".to_string())) },
+            PositionalToken { source: uws, offset: 1402, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1403, length: 16, token: Token::Word(Word::Word("ежегодно".to_string())) },
+            PositionalToken { source: uws, offset: 1419, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1420, length: 2, token: Token::Word(Word::Word("в".to_string())) },
+            PositionalToken { source: uws, offset: 1422, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1423, length: 12, token: Token::Word(Word::Word("России".to_string())) },
+            PositionalToken { source: uws, offset: 1435, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1436, length: 22, token: Token::Word(Word::Word("празднество".to_string())) },
+            PositionalToken { source: uws, offset: 1458, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1459, length: 6, token: Token::Word(Word::Word("дня".to_string())) },
+            PositionalToken { source: uws, offset: 1465, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1466, length: 8, token: Token::Word(Word::Word("мамы".to_string())) },
+            PositionalToken { source: uws, offset: 1474, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1475, length: 10, token: Token::Word(Word::Word("будет".to_string())) },
+            PositionalToken { source: uws, offset: 1485, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1486, length: 16, token: Token::Word(Word::Word("выпадать".to_string())) },
+            PositionalToken { source: uws, offset: 1502, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1503, length: 4, token: Token::Word(Word::Word("на".to_string())) },
+            PositionalToken { source: uws, offset: 1507, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1508, length: 18, token: Token::Word(Word::Word("последнее".to_string())) },
+            PositionalToken { source: uws, offset: 1526, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1527, length: 22, token: Token::Word(Word::Word("воскресенье".to_string())) },
+            PositionalToken { source: uws, offset: 1549, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1550, length: 12, token: Token::Word(Word::Word("ноября".to_string())) },
+            PositionalToken { source: uws, offset: 1562, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 1563, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1664, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 1665, length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 1725, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 1726, length: 4, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 2725, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 2726, length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 2888, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 2889, length: 2, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 2891, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 2904, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 2905, length: 4, token: Token::Special(Special::Separator(Separator::Space)) },
         ];  
         
         let text = Text::new({
@@ -2002,7 +1458,7 @@ mod test {
                 .into_separator()
         }).unwrap();
 
-        let lib_res = text.into_tokens().filter_map(|tt| tt.into_original_token()).collect::<Vec<_>>();
+        let lib_res = text.into_tokenizer(TokenizerParams::v1()).filter_map(|tt| tt.into_original_token_1()).collect::<Vec<_>>();
 
         check_results(&result,&lib_res,uws);
     }
@@ -2012,35 +1468,35 @@ mod test {
         let uws = "[club113623432|💜💜💜 - для девушек] \n[club113623432|💛💛💛 - для сохраненок]";
         let result = vec![
             PositionalToken { offset: 0, length: 52, token: Token::BBCode { left: vec![
-                PositionalToken { offset: 1, length: 13, token: Token::Numerical(Numerical::Alphanumeric("club113623432".to_string())) },
+                PositionalToken { offset: 1, length: 13, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("club113623432".to_string()))) },
                 ], right: vec![
-                PositionalToken { offset: 15, length: 4, token: Token::Emoji("purple_heart") },
-                PositionalToken { offset: 19, length: 4, token: Token::Emoji("purple_heart") },
-                PositionalToken { offset: 23, length: 4, token: Token::Emoji("purple_heart") },
-                PositionalToken { offset: 27, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { offset: 28, length: 1, token: Token::Punctuation("-".to_string()) },
-                PositionalToken { offset: 29, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { offset: 30, length: 6, token: Token::Word("для".to_string()) },
-                PositionalToken { offset: 36, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { offset: 37, length: 14, token: Token::Word("девушек".to_string()) },
+                PositionalToken { offset: 15, length: 4, token: Token::Word(Word::Emoji("purple_heart")) },
+                PositionalToken { offset: 19, length: 4, token: Token::Word(Word::Emoji("purple_heart")) },
+                PositionalToken { offset: 23, length: 4, token: Token::Word(Word::Emoji("purple_heart")) },
+                PositionalToken { offset: 27, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { offset: 28, length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+                PositionalToken { offset: 29, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { offset: 30, length: 6, token: Token::Word(Word::Word("для".to_string())) },
+                PositionalToken { offset: 36, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { offset: 37, length: 14, token: Token::Word(Word::Word("девушек".to_string())) },
                 ] } },
-            PositionalToken { offset: 52, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { offset: 53, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { offset: 52, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { offset: 53, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             PositionalToken { offset: 54, length: 58, token: Token::BBCode { left: vec![
-                PositionalToken { offset: 55, length: 13, token: Token::Numerical(Numerical::Alphanumeric("club113623432".to_string())) },
+                PositionalToken { offset: 55, length: 13, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("club113623432".to_string()))) },
                 ], right: vec![
-                PositionalToken { offset: 69, length: 4, token: Token::Emoji("yellow_heart") },
-                PositionalToken { offset: 73, length: 4, token: Token::Emoji("yellow_heart") },
-                PositionalToken { offset: 77, length: 4, token: Token::Emoji("yellow_heart") },
-                PositionalToken { offset: 81, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { offset: 82, length: 1, token: Token::Punctuation("-".to_string()) },
-                PositionalToken { offset: 83, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { offset: 84, length: 6, token: Token::Word("для".to_string()) },
-                PositionalToken { offset: 90, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { offset: 91, length: 20, token: Token::Word("сохраненок".to_string()) },
+                PositionalToken { offset: 69, length: 4, token: Token::Word(Word::Emoji("yellow_heart")) },
+                PositionalToken { offset: 73, length: 4, token: Token::Word(Word::Emoji("yellow_heart")) },
+                PositionalToken { offset: 77, length: 4, token: Token::Word(Word::Emoji("yellow_heart")) },
+                PositionalToken { offset: 81, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { offset: 82, length: 1, token: Token::Special(Special::Punctuation("-".to_string())) },
+                PositionalToken { offset: 83, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { offset: 84, length: 6, token: Token::Word(Word::Word("для".to_string())) },
+                PositionalToken { offset: 90, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { offset: 91, length: 20, token: Token::Word(Word::Word("сохраненок".to_string())) },
                 ] } },
             ];
-        let lib_res = uws.complex_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::complex()).collect::<Vec<_>>();
         //print_result(&lib_res); panic!("");
         check_results(&result,&lib_res,uws);
     }*/
@@ -2049,10 +1505,10 @@ mod test {
     fn text_href_and_html () {
         let uws = "https://youtu.be/dQErLQZw3qA</a></p><figure data-type=\"102\" data-mode=\"\"  class=\"article_decoration_first article_decoration_last\" >\n";
         let result =  vec![
-            PositionalToken { offset: 0, length: 28, token: Token::Url("https://youtu.be/dQErLQZw3qA".to_string()) },
-            PositionalToken { offset: 132, length: 1, token: Token::Separator(Separator::Newline) },
+            PositionalToken { offset: 0, length: 28, token: Token::Struct(Struct::Url("https://youtu.be/dQErLQZw3qA".to_string())) },
+            PositionalToken { offset: 132, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
             ];
-        let lib_res = uws.into_tokens().unwrap().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).unwrap().collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
         //print_result(&lib_res); panic!("")
     }*/
@@ -2060,28 +1516,28 @@ mod test {
     #[test]
     fn numerical_no_split() {
         let uws = "12.02.18 31.28.34 23.11.2018 123.568.365.234.578 127.0.0.1 1st 1кг 123123афываыв 12321фвафыов234выалфо 12_123_343.4234_4234";
-        let lib_res = uws.into_tokens_with_options(Default::default()).collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(Default::default()).collect::<Vec<_>>();
         //print_result(&lib_res); panic!("");
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 8, token: Token::Numerical(Numerical::DotSeparated("12.02.18".to_string())) },
-            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 9, length: 8, token: Token::Numerical(Numerical::DotSeparated("31.28.34".to_string())) },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 18, length: 10, token: Token::Numerical(Numerical::DotSeparated("23.11.2018".to_string())) },
-            PositionalToken { source: uws, offset: 28, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 29, length: 19, token: Token::Numerical(Numerical::DotSeparated("123.568.365.234.578".to_string())) },
-            PositionalToken { source: uws, offset: 48, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 49, length: 9, token: Token::Numerical(Numerical::DotSeparated("127.0.0.1".to_string())) },
-            PositionalToken { source: uws, offset: 58, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 59, length: 3, token: Token::Numerical(Numerical::Measures("1st".to_string())) },
-            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 63, length: 5, token: Token::Numerical(Numerical::Measures("1кг".to_string())) },
-            PositionalToken { source: uws, offset: 68, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 69, length: 20, token: Token::Numerical(Numerical::Measures("123123афываыв".to_string())) },
-            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 90, length: 34, token: Token::Numerical(Numerical::Alphanumeric("12321фвафыов234выалфо".to_string())) },
-            PositionalToken { source: uws, offset: 124, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 125, length: 20, token: Token::Numerical(Numerical::Alphanumeric("12_123_343.4234_4234".to_string())) },
+            PositionalToken { source: uws, offset: 0, length: 8, token: Token::Word(Word::Numerical(Numerical::DotSeparated("12.02.18".to_string()))) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 9, length: 8, token: Token::Word(Word::Numerical(Numerical::DotSeparated("31.28.34".to_string()))) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 18, length: 10, token: Token::Word(Word::Numerical(Numerical::DotSeparated("23.11.2018".to_string()))) },
+            PositionalToken { source: uws, offset: 28, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 29, length: 19, token: Token::Word(Word::Numerical(Numerical::DotSeparated("123.568.365.234.578".to_string()))) },
+            PositionalToken { source: uws, offset: 48, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 49, length: 9, token: Token::Word(Word::Numerical(Numerical::DotSeparated("127.0.0.1".to_string()))) },
+            PositionalToken { source: uws, offset: 58, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 59, length: 3, token: Token::Word(Word::Numerical(Numerical::Measures("1st".to_string()))) },
+            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 63, length: 5, token: Token::Word(Word::Numerical(Numerical::Measures("1кг".to_string()))) },
+            PositionalToken { source: uws, offset: 68, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 69, length: 20, token: Token::Word(Word::Numerical(Numerical::Measures("123123афываыв".to_string()))) },
+            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 90, length: 34, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("12321фвафыов234выалфо".to_string()))) },
+            PositionalToken { source: uws, offset: 124, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 125, length: 20, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("12_123_343.4234_4234".to_string()))) },
             ];
         check_results(&result,&lib_res,uws);
        
@@ -2090,62 +1546,62 @@ mod test {
     #[test]
     fn numerical_default() {
         let uws = "12.02.18 31.28.34 23.11.2018 123.568.365.234.578 127.0.0.1 1st 1кг 123123афываыв 12321фвафыов234выалфо 12_123_343.4234_4234";
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         //print_result(&lib_res); panic!("");
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 2, token: Token::Number(Number::Integer(12)) },
-            PositionalToken { source: uws, offset: 2, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 3, length: 2, token: Token::Number(Number::Integer(2)) },
-            PositionalToken { source: uws, offset: 5, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 6, length: 2, token: Token::Number(Number::Integer(18)) },
-            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 9, length: 2, token: Token::Number(Number::Integer(31)) },
-            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 12, length: 2, token: Token::Number(Number::Integer(28)) },
-            PositionalToken { source: uws, offset: 14, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 15, length: 2, token: Token::Number(Number::Integer(34)) },
-            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 18, length: 2, token: Token::Number(Number::Integer(23)) },
-            PositionalToken { source: uws, offset: 20, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 21, length: 2, token: Token::Number(Number::Integer(11)) },
-            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 24, length: 4, token: Token::Number(Number::Integer(2018)) },
-            PositionalToken { source: uws, offset: 28, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 29, length: 3, token: Token::Number(Number::Integer(123)) },
-            PositionalToken { source: uws, offset: 32, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 33, length: 3, token: Token::Number(Number::Integer(568)) },
-            PositionalToken { source: uws, offset: 36, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 37, length: 3, token: Token::Number(Number::Integer(365)) },
-            PositionalToken { source: uws, offset: 40, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 41, length: 3, token: Token::Number(Number::Integer(234)) },
-            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 45, length: 3, token: Token::Number(Number::Integer(578)) },
-            PositionalToken { source: uws, offset: 48, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 49, length: 3, token: Token::Number(Number::Integer(127)) },
-            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 53, length: 1, token: Token::Number(Number::Integer(0)) },
-            PositionalToken { source: uws, offset: 54, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 55, length: 1, token: Token::Number(Number::Integer(0)) },
-            PositionalToken { source: uws, offset: 56, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Number(Number::Integer(1)) },
-            PositionalToken { source: uws, offset: 58, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 59, length: 3, token: Token::Numerical(Numerical::Measures("1st".to_string())) },
-            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 63, length: 5, token: Token::Numerical(Numerical::Measures("1кг".to_string())) },
-            PositionalToken { source: uws, offset: 68, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 69, length: 20, token: Token::Numerical(Numerical::Measures("123123афываыв".to_string())) },
-            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 90, length: 34, token: Token::Numerical(Numerical::Alphanumeric("12321фвафыов234выалфо".to_string())) },
-            PositionalToken { source: uws, offset: 124, length: 1, token: Token::Separator(Separator::Space) },
-            PositionalToken { source: uws, offset: 125, length: 2, token: Token::Number(Number::Integer(12)) },
-            PositionalToken { source: uws, offset: 127, length: 1, token: Token::Punctuation("_".to_string()) },
-            PositionalToken { source: uws, offset: 128, length: 3, token: Token::Number(Number::Integer(123)) },
-            PositionalToken { source: uws, offset: 131, length: 1, token: Token::Punctuation("_".to_string()) },
-            PositionalToken { source: uws, offset: 132, length: 3, token: Token::Number(Number::Integer(343)) },
-            PositionalToken { source: uws, offset: 135, length: 1, token: Token::Punctuation(".".to_string()) },
-            PositionalToken { source: uws, offset: 136, length: 4, token: Token::Number(Number::Integer(4234)) },
-            PositionalToken { source: uws, offset: 140, length: 1, token: Token::Punctuation("_".to_string()) },
-            PositionalToken { source: uws, offset: 141, length: 4, token: Token::Number(Number::Integer(4234)) },
+            PositionalToken { source: uws, offset: 0, length: 2, token: Token::Word(Word::Number(Number::Integer(12))) },
+            PositionalToken { source: uws, offset: 2, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 3, length: 2, token: Token::Word(Word::Number(Number::Integer(2))) },
+            PositionalToken { source: uws, offset: 5, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 6, length: 2, token: Token::Word(Word::Number(Number::Integer(18))) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 9, length: 2, token: Token::Word(Word::Number(Number::Integer(31))) },
+            PositionalToken { source: uws, offset: 11, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 12, length: 2, token: Token::Word(Word::Number(Number::Integer(28))) },
+            PositionalToken { source: uws, offset: 14, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 15, length: 2, token: Token::Word(Word::Number(Number::Integer(34))) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 18, length: 2, token: Token::Word(Word::Number(Number::Integer(23))) },
+            PositionalToken { source: uws, offset: 20, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 21, length: 2, token: Token::Word(Word::Number(Number::Integer(11))) },
+            PositionalToken { source: uws, offset: 23, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 24, length: 4, token: Token::Word(Word::Number(Number::Integer(2018))) },
+            PositionalToken { source: uws, offset: 28, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 29, length: 3, token: Token::Word(Word::Number(Number::Integer(123))) },
+            PositionalToken { source: uws, offset: 32, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 33, length: 3, token: Token::Word(Word::Number(Number::Integer(568))) },
+            PositionalToken { source: uws, offset: 36, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 37, length: 3, token: Token::Word(Word::Number(Number::Integer(365))) },
+            PositionalToken { source: uws, offset: 40, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 41, length: 3, token: Token::Word(Word::Number(Number::Integer(234))) },
+            PositionalToken { source: uws, offset: 44, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 45, length: 3, token: Token::Word(Word::Number(Number::Integer(578))) },
+            PositionalToken { source: uws, offset: 48, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 49, length: 3, token: Token::Word(Word::Number(Number::Integer(127))) },
+            PositionalToken { source: uws, offset: 52, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 53, length: 1, token: Token::Word(Word::Number(Number::Integer(0))) },
+            PositionalToken { source: uws, offset: 54, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 55, length: 1, token: Token::Word(Word::Number(Number::Integer(0))) },
+            PositionalToken { source: uws, offset: 56, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 57, length: 1, token: Token::Word(Word::Number(Number::Integer(1))) },
+            PositionalToken { source: uws, offset: 58, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 59, length: 3, token: Token::Word(Word::Numerical(Numerical::Measures("1st".to_string()))) },
+            PositionalToken { source: uws, offset: 62, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 63, length: 5, token: Token::Word(Word::Numerical(Numerical::Measures("1кг".to_string()))) },
+            PositionalToken { source: uws, offset: 68, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 69, length: 20, token: Token::Word(Word::Numerical(Numerical::Measures("123123афываыв".to_string()))) },
+            PositionalToken { source: uws, offset: 89, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 90, length: 34, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("12321фвафыов234выалфо".to_string()))) },
+            PositionalToken { source: uws, offset: 124, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 125, length: 2, token: Token::Word(Word::Number(Number::Integer(12))) },
+            PositionalToken { source: uws, offset: 127, length: 1, token: Token::Special(Special::Punctuation("_".to_string())) },
+            PositionalToken { source: uws, offset: 128, length: 3, token: Token::Word(Word::Number(Number::Integer(123))) },
+            PositionalToken { source: uws, offset: 131, length: 1, token: Token::Special(Special::Punctuation("_".to_string())) },
+            PositionalToken { source: uws, offset: 132, length: 3, token: Token::Word(Word::Number(Number::Integer(343))) },
+            PositionalToken { source: uws, offset: 135, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+            PositionalToken { source: uws, offset: 136, length: 4, token: Token::Word(Word::Number(Number::Integer(4234))) },
+            PositionalToken { source: uws, offset: 140, length: 1, token: Token::Special(Special::Punctuation("_".to_string())) },
+            PositionalToken { source: uws, offset: 141, length: 4, token: Token::Word(Word::Number(Number::Integer(4234))) },
             ];
         check_results(&result,&lib_res,uws);
        
@@ -2154,7 +1610,7 @@ mod test {
         /*#[test]
     fn new_test() {
         let uws = "";
-        let lib_res = uws.into_tokens().unwrap().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).unwrap().collect::<Vec<_>>();
         print_result(&lib_res); panic!("");
         let result = vec![];
         check_results(&result,&lib_res,uws);
@@ -2177,35 +1633,35 @@ mod test {
     #[test]
     fn test_lang_zho() {
         let (uws,result) = get_lang_test(Lang::Zho);
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,&uws);
     }
 
     #[test]
     fn test_lang_jpn() {
         let (uws,result) = get_lang_test(Lang::Jpn);
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,&uws);
     }
 
     #[test]
     fn test_lang_kor() {
         let (uws,result) = get_lang_test(Lang::Kor);
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,&uws);
     }
 
     #[test]
     fn test_lang_ara() {
         let (uws,result) = get_lang_test(Lang::Ara);
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,&uws);
     }
 
     #[test]
     fn test_lang_ell() {
         let (uws,result) = get_lang_test(Lang::Ell);
-        let lib_res = uws.into_tokens().collect::<Vec<_>>();
+        let lib_res = uws.into_tokenizer(TokenizerParams::v1()).collect::<Vec<_>>();
         check_results(&result,&lib_res,&uws);
     }
 
@@ -2219,327 +1675,327 @@ mod test {
         };
         let tokens = match lng {
             Lang::Zho => vec![
-                PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word("美".to_string()) },
-                PositionalToken { source: uws, offset: 3, length: 3, token: Token::Word("国".to_string()) },
-                PositionalToken { source: uws, offset: 6, length: 3, token: Token::Word("电".to_string()) },
-                PositionalToken { source: uws, offset: 9, length: 3, token: Token::Word("视".to_string()) },
-                PositionalToken { source: uws, offset: 12, length: 3, token: Token::Word("连".to_string()) },
-                PositionalToken { source: uws, offset: 15, length: 3, token: Token::Word("续".to_string()) },
-                PositionalToken { source: uws, offset: 18, length: 3, token: Token::Word("剧".to_string()) },
-                PositionalToken { source: uws, offset: 21, length: 3, token: Token::Punctuation("《".to_string()) },
-                PositionalToken { source: uws, offset: 24, length: 3, token: Token::Word("超".to_string()) },
-                PositionalToken { source: uws, offset: 27, length: 3, token: Token::Word("人".to_string()) },
-                PositionalToken { source: uws, offset: 30, length: 3, token: Token::Word("前".to_string()) },
-                PositionalToken { source: uws, offset: 33, length: 3, token: Token::Word("传".to_string()) },
-                PositionalToken { source: uws, offset: 36, length: 3, token: Token::Punctuation("》".to_string()) },
-                PositionalToken { source: uws, offset: 39, length: 3, token: Token::Word("的".to_string()) },
-                PositionalToken { source: uws, offset: 42, length: 3, token: Token::Word("第".to_string()) },
-                PositionalToken { source: uws, offset: 45, length: 3, token: Token::Word("一".to_string()) },
-                PositionalToken { source: uws, offset: 48, length: 3, token: Token::Word("集".to_string()) },
-                PositionalToken { source: uws, offset: 51, length: 3, token: Token::Punctuation("《".to_string()) },
-                PositionalToken { source: uws, offset: 54, length: 3, token: Token::Word("试".to_string()) },
-                PositionalToken { source: uws, offset: 57, length: 3, token: Token::Word("播".to_string()) },
-                PositionalToken { source: uws, offset: 60, length: 3, token: Token::Word("集".to_string()) },
-                PositionalToken { source: uws, offset: 63, length: 3, token: Token::Punctuation("》".to_string()) },
-                PositionalToken { source: uws, offset: 66, length: 3, token: Token::Word("于".to_string()) },
-                PositionalToken { source: uws, offset: 69, length: 4, token: Token::Number(Number::Integer(2001)) },
-                PositionalToken { source: uws, offset: 73, length: 3, token: Token::Word("年".to_string()) },
-                PositionalToken { source: uws, offset: 76, length: 2, token: Token::Number(Number::Integer(10)) },
-                PositionalToken { source: uws, offset: 78, length: 3, token: Token::Word("月".to_string()) },
-                PositionalToken { source: uws, offset: 81, length: 2, token: Token::Number(Number::Integer(16)) },
-                PositionalToken { source: uws, offset: 83, length: 3, token: Token::Word("日".to_string()) },
-                PositionalToken { source: uws, offset: 86, length: 3, token: Token::Word("在".to_string()) },
-                PositionalToken { source: uws, offset: 89, length: 3, token: Token::Word("電".to_string()) },
-                PositionalToken { source: uws, offset: 92, length: 3, token: Token::Word("視".to_string()) },
-                PositionalToken { source: uws, offset: 95, length: 3, token: Token::Word("網".to_string()) },
-                PositionalToken { source: uws, offset: 98, length: 3, token: Token::Word("首".to_string()) },
-                PositionalToken { source: uws, offset: 101, length: 3, token: Token::Word("播".to_string()) },
-                PositionalToken { source: uws, offset: 104, length: 3, token: Token::Punctuation("，".to_string()) },
-                PositionalToken { source: uws, offset: 107, length: 3, token: Token::Word("剧".to_string()) },
-                PositionalToken { source: uws, offset: 110, length: 3, token: Token::Word("集".to_string()) },
-                PositionalToken { source: uws, offset: 113, length: 3, token: Token::Word("主".to_string()) },
-                PositionalToken { source: uws, offset: 116, length: 3, token: Token::Word("创".to_string()) },
-                PositionalToken { source: uws, offset: 119, length: 3, token: Token::Word("人".to_string()) },
-                PositionalToken { source: uws, offset: 122, length: 3, token: Token::Word("阿".to_string()) },
-                PositionalToken { source: uws, offset: 125, length: 3, token: Token::Word("尔".to_string()) },
-                PositionalToken { source: uws, offset: 128, length: 3, token: Token::Word("弗".to_string()) },
-                PositionalToken { source: uws, offset: 131, length: 3, token: Token::Word("雷".to_string()) },
-                PositionalToken { source: uws, offset: 134, length: 3, token: Token::Word("德".to_string()) },
-                PositionalToken { source: uws, offset: 137, length: 2, token: Token::Punctuation("·".to_string()) },
-                PositionalToken { source: uws, offset: 139, length: 3, token: Token::Word("高".to_string()) },
-                PositionalToken { source: uws, offset: 142, length: 3, token: Token::Word("夫".to_string()) },
-                PositionalToken { source: uws, offset: 145, length: 3, token: Token::Word("和".to_string()) },
-                PositionalToken { source: uws, offset: 148, length: 3, token: Token::Word("迈".to_string()) },
-                PositionalToken { source: uws, offset: 151, length: 3, token: Token::Word("尔".to_string()) },
-                PositionalToken { source: uws, offset: 154, length: 3, token: Token::Word("斯".to_string()) },
-                PositionalToken { source: uws, offset: 157, length: 2, token: Token::Punctuation("·".to_string()) },
-                PositionalToken { source: uws, offset: 159, length: 3, token: Token::Word("米".to_string()) },
-                PositionalToken { source: uws, offset: 162, length: 3, token: Token::Word("勒".to_string()) },
-                PositionalToken { source: uws, offset: 165, length: 3, token: Token::Word("編".to_string()) },
-                PositionalToken { source: uws, offset: 168, length: 3, token: Token::Word("劇".to_string()) },
-                PositionalToken { source: uws, offset: 171, length: 3, token: Token::Punctuation("，".to_string()) },
-                PositionalToken { source: uws, offset: 174, length: 3, token: Token::Word("大".to_string()) },
-                PositionalToken { source: uws, offset: 177, length: 3, token: Token::Word("卫".to_string()) },
-                PositionalToken { source: uws, offset: 180, length: 2, token: Token::Punctuation("·".to_string()) },
-                PositionalToken { source: uws, offset: 182, length: 3, token: Token::Word("努".to_string()) },
-                PositionalToken { source: uws, offset: 185, length: 3, token: Token::Word("特".to_string()) },
-                PositionalToken { source: uws, offset: 188, length: 3, token: Token::Word("尔".to_string()) },
-                PositionalToken { source: uws, offset: 191, length: 3, token: Token::Word("执".to_string()) },
-                PositionalToken { source: uws, offset: 194, length: 3, token: Token::Word("导".to_string()) },
-                PositionalToken { source: uws, offset: 197, length: 3, token: Token::Punctuation("。".to_string()) },
-                PositionalToken { source: uws, offset: 200, length: 3, token: Token::Word("这".to_string()) },
-                PositionalToken { source: uws, offset: 203, length: 3, token: Token::Word("一".to_string()) },
-                PositionalToken { source: uws, offset: 206, length: 3, token: Token::Word("试".to_string()) },
-                PositionalToken { source: uws, offset: 209, length: 3, token: Token::Word("播".to_string()) },
-                PositionalToken { source: uws, offset: 212, length: 3, token: Token::Word("首".to_string()) },
-                PositionalToken { source: uws, offset: 215, length: 3, token: Token::Word("次".to_string()) },
-                PositionalToken { source: uws, offset: 218, length: 3, token: Token::Word("向".to_string()) },
-                PositionalToken { source: uws, offset: 221, length: 3, token: Token::Word("观".to_string()) },
-                PositionalToken { source: uws, offset: 224, length: 3, token: Token::Word("众".to_string()) },
-                PositionalToken { source: uws, offset: 227, length: 3, token: Token::Word("引".to_string()) },
-                PositionalToken { source: uws, offset: 230, length: 3, token: Token::Word("荐".to_string()) },
-                PositionalToken { source: uws, offset: 233, length: 3, token: Token::Word("了".to_string()) },
-                PositionalToken { source: uws, offset: 236, length: 3, token: Token::Word("克".to_string()) },
-                PositionalToken { source: uws, offset: 239, length: 3, token: Token::Word("拉".to_string()) },
-                PositionalToken { source: uws, offset: 242, length: 3, token: Token::Word("克".to_string()) },
-                PositionalToken { source: uws, offset: 245, length: 2, token: Token::Punctuation("·".to_string()) },
-                PositionalToken { source: uws, offset: 247, length: 3, token: Token::Word("肯".to_string()) },
-                PositionalToken { source: uws, offset: 250, length: 3, token: Token::Word("特".to_string()) },
-                PositionalToken { source: uws, offset: 253, length: 3, token: Token::Word("一".to_string()) },
-                PositionalToken { source: uws, offset: 256, length: 3, token: Token::Word("角".to_string()) },
-                PositionalToken { source: uws, offset: 259, length: 3, token: Token::Punctuation("，".to_string()) },
-                PositionalToken { source: uws, offset: 262, length: 3, token: Token::Word("他".to_string()) },
-                PositionalToken { source: uws, offset: 265, length: 3, token: Token::Word("是".to_string()) },
-                PositionalToken { source: uws, offset: 268, length: 3, token: Token::Word("位".to_string()) },
-                PositionalToken { source: uws, offset: 271, length: 3, token: Token::Word("拥".to_string()) },
-                PositionalToken { source: uws, offset: 274, length: 3, token: Token::Word("有".to_string()) },
-                PositionalToken { source: uws, offset: 277, length: 3, token: Token::Word("超".to_string()) },
+                PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Word("美".to_string())) },
+                PositionalToken { source: uws, offset: 3, length: 3, token: Token::Word(Word::Word("国".to_string())) },
+                PositionalToken { source: uws, offset: 6, length: 3, token: Token::Word(Word::Word("电".to_string())) },
+                PositionalToken { source: uws, offset: 9, length: 3, token: Token::Word(Word::Word("视".to_string())) },
+                PositionalToken { source: uws, offset: 12, length: 3, token: Token::Word(Word::Word("连".to_string())) },
+                PositionalToken { source: uws, offset: 15, length: 3, token: Token::Word(Word::Word("续".to_string())) },
+                PositionalToken { source: uws, offset: 18, length: 3, token: Token::Word(Word::Word("剧".to_string())) },
+                PositionalToken { source: uws, offset: 21, length: 3, token: Token::Special(Special::Punctuation("《".to_string())) },
+                PositionalToken { source: uws, offset: 24, length: 3, token: Token::Word(Word::Word("超".to_string())) },
+                PositionalToken { source: uws, offset: 27, length: 3, token: Token::Word(Word::Word("人".to_string())) },
+                PositionalToken { source: uws, offset: 30, length: 3, token: Token::Word(Word::Word("前".to_string())) },
+                PositionalToken { source: uws, offset: 33, length: 3, token: Token::Word(Word::Word("传".to_string())) },
+                PositionalToken { source: uws, offset: 36, length: 3, token: Token::Special(Special::Punctuation("》".to_string())) },
+                PositionalToken { source: uws, offset: 39, length: 3, token: Token::Word(Word::Word("的".to_string())) },
+                PositionalToken { source: uws, offset: 42, length: 3, token: Token::Word(Word::Word("第".to_string())) },
+                PositionalToken { source: uws, offset: 45, length: 3, token: Token::Word(Word::Word("一".to_string())) },
+                PositionalToken { source: uws, offset: 48, length: 3, token: Token::Word(Word::Word("集".to_string())) },
+                PositionalToken { source: uws, offset: 51, length: 3, token: Token::Special(Special::Punctuation("《".to_string())) },
+                PositionalToken { source: uws, offset: 54, length: 3, token: Token::Word(Word::Word("试".to_string())) },
+                PositionalToken { source: uws, offset: 57, length: 3, token: Token::Word(Word::Word("播".to_string())) },
+                PositionalToken { source: uws, offset: 60, length: 3, token: Token::Word(Word::Word("集".to_string())) },
+                PositionalToken { source: uws, offset: 63, length: 3, token: Token::Special(Special::Punctuation("》".to_string())) },
+                PositionalToken { source: uws, offset: 66, length: 3, token: Token::Word(Word::Word("于".to_string())) },
+                PositionalToken { source: uws, offset: 69, length: 4, token: Token::Word(Word::Number(Number::Integer(2001))) },
+                PositionalToken { source: uws, offset: 73, length: 3, token: Token::Word(Word::Word("年".to_string())) },
+                PositionalToken { source: uws, offset: 76, length: 2, token: Token::Word(Word::Number(Number::Integer(10))) },
+                PositionalToken { source: uws, offset: 78, length: 3, token: Token::Word(Word::Word("月".to_string())) },
+                PositionalToken { source: uws, offset: 81, length: 2, token: Token::Word(Word::Number(Number::Integer(16))) },
+                PositionalToken { source: uws, offset: 83, length: 3, token: Token::Word(Word::Word("日".to_string())) },
+                PositionalToken { source: uws, offset: 86, length: 3, token: Token::Word(Word::Word("在".to_string())) },
+                PositionalToken { source: uws, offset: 89, length: 3, token: Token::Word(Word::Word("電".to_string())) },
+                PositionalToken { source: uws, offset: 92, length: 3, token: Token::Word(Word::Word("視".to_string())) },
+                PositionalToken { source: uws, offset: 95, length: 3, token: Token::Word(Word::Word("網".to_string())) },
+                PositionalToken { source: uws, offset: 98, length: 3, token: Token::Word(Word::Word("首".to_string())) },
+                PositionalToken { source: uws, offset: 101, length: 3, token: Token::Word(Word::Word("播".to_string())) },
+                PositionalToken { source: uws, offset: 104, length: 3, token: Token::Special(Special::Punctuation("，".to_string())) },
+                PositionalToken { source: uws, offset: 107, length: 3, token: Token::Word(Word::Word("剧".to_string())) },
+                PositionalToken { source: uws, offset: 110, length: 3, token: Token::Word(Word::Word("集".to_string())) },
+                PositionalToken { source: uws, offset: 113, length: 3, token: Token::Word(Word::Word("主".to_string())) },
+                PositionalToken { source: uws, offset: 116, length: 3, token: Token::Word(Word::Word("创".to_string())) },
+                PositionalToken { source: uws, offset: 119, length: 3, token: Token::Word(Word::Word("人".to_string())) },
+                PositionalToken { source: uws, offset: 122, length: 3, token: Token::Word(Word::Word("阿".to_string())) },
+                PositionalToken { source: uws, offset: 125, length: 3, token: Token::Word(Word::Word("尔".to_string())) },
+                PositionalToken { source: uws, offset: 128, length: 3, token: Token::Word(Word::Word("弗".to_string())) },
+                PositionalToken { source: uws, offset: 131, length: 3, token: Token::Word(Word::Word("雷".to_string())) },
+                PositionalToken { source: uws, offset: 134, length: 3, token: Token::Word(Word::Word("德".to_string())) },
+                PositionalToken { source: uws, offset: 137, length: 2, token: Token::Special(Special::Punctuation("·".to_string())) },
+                PositionalToken { source: uws, offset: 139, length: 3, token: Token::Word(Word::Word("高".to_string())) },
+                PositionalToken { source: uws, offset: 142, length: 3, token: Token::Word(Word::Word("夫".to_string())) },
+                PositionalToken { source: uws, offset: 145, length: 3, token: Token::Word(Word::Word("和".to_string())) },
+                PositionalToken { source: uws, offset: 148, length: 3, token: Token::Word(Word::Word("迈".to_string())) },
+                PositionalToken { source: uws, offset: 151, length: 3, token: Token::Word(Word::Word("尔".to_string())) },
+                PositionalToken { source: uws, offset: 154, length: 3, token: Token::Word(Word::Word("斯".to_string())) },
+                PositionalToken { source: uws, offset: 157, length: 2, token: Token::Special(Special::Punctuation("·".to_string())) },
+                PositionalToken { source: uws, offset: 159, length: 3, token: Token::Word(Word::Word("米".to_string())) },
+                PositionalToken { source: uws, offset: 162, length: 3, token: Token::Word(Word::Word("勒".to_string())) },
+                PositionalToken { source: uws, offset: 165, length: 3, token: Token::Word(Word::Word("編".to_string())) },
+                PositionalToken { source: uws, offset: 168, length: 3, token: Token::Word(Word::Word("劇".to_string())) },
+                PositionalToken { source: uws, offset: 171, length: 3, token: Token::Special(Special::Punctuation("，".to_string())) },
+                PositionalToken { source: uws, offset: 174, length: 3, token: Token::Word(Word::Word("大".to_string())) },
+                PositionalToken { source: uws, offset: 177, length: 3, token: Token::Word(Word::Word("卫".to_string())) },
+                PositionalToken { source: uws, offset: 180, length: 2, token: Token::Special(Special::Punctuation("·".to_string())) },
+                PositionalToken { source: uws, offset: 182, length: 3, token: Token::Word(Word::Word("努".to_string())) },
+                PositionalToken { source: uws, offset: 185, length: 3, token: Token::Word(Word::Word("特".to_string())) },
+                PositionalToken { source: uws, offset: 188, length: 3, token: Token::Word(Word::Word("尔".to_string())) },
+                PositionalToken { source: uws, offset: 191, length: 3, token: Token::Word(Word::Word("执".to_string())) },
+                PositionalToken { source: uws, offset: 194, length: 3, token: Token::Word(Word::Word("导".to_string())) },
+                PositionalToken { source: uws, offset: 197, length: 3, token: Token::Special(Special::Punctuation("。".to_string())) },
+                PositionalToken { source: uws, offset: 200, length: 3, token: Token::Word(Word::Word("这".to_string())) },
+                PositionalToken { source: uws, offset: 203, length: 3, token: Token::Word(Word::Word("一".to_string())) },
+                PositionalToken { source: uws, offset: 206, length: 3, token: Token::Word(Word::Word("试".to_string())) },
+                PositionalToken { source: uws, offset: 209, length: 3, token: Token::Word(Word::Word("播".to_string())) },
+                PositionalToken { source: uws, offset: 212, length: 3, token: Token::Word(Word::Word("首".to_string())) },
+                PositionalToken { source: uws, offset: 215, length: 3, token: Token::Word(Word::Word("次".to_string())) },
+                PositionalToken { source: uws, offset: 218, length: 3, token: Token::Word(Word::Word("向".to_string())) },
+                PositionalToken { source: uws, offset: 221, length: 3, token: Token::Word(Word::Word("观".to_string())) },
+                PositionalToken { source: uws, offset: 224, length: 3, token: Token::Word(Word::Word("众".to_string())) },
+                PositionalToken { source: uws, offset: 227, length: 3, token: Token::Word(Word::Word("引".to_string())) },
+                PositionalToken { source: uws, offset: 230, length: 3, token: Token::Word(Word::Word("荐".to_string())) },
+                PositionalToken { source: uws, offset: 233, length: 3, token: Token::Word(Word::Word("了".to_string())) },
+                PositionalToken { source: uws, offset: 236, length: 3, token: Token::Word(Word::Word("克".to_string())) },
+                PositionalToken { source: uws, offset: 239, length: 3, token: Token::Word(Word::Word("拉".to_string())) },
+                PositionalToken { source: uws, offset: 242, length: 3, token: Token::Word(Word::Word("克".to_string())) },
+                PositionalToken { source: uws, offset: 245, length: 2, token: Token::Special(Special::Punctuation("·".to_string())) },
+                PositionalToken { source: uws, offset: 247, length: 3, token: Token::Word(Word::Word("肯".to_string())) },
+                PositionalToken { source: uws, offset: 250, length: 3, token: Token::Word(Word::Word("特".to_string())) },
+                PositionalToken { source: uws, offset: 253, length: 3, token: Token::Word(Word::Word("一".to_string())) },
+                PositionalToken { source: uws, offset: 256, length: 3, token: Token::Word(Word::Word("角".to_string())) },
+                PositionalToken { source: uws, offset: 259, length: 3, token: Token::Special(Special::Punctuation("，".to_string())) },
+                PositionalToken { source: uws, offset: 262, length: 3, token: Token::Word(Word::Word("他".to_string())) },
+                PositionalToken { source: uws, offset: 265, length: 3, token: Token::Word(Word::Word("是".to_string())) },
+                PositionalToken { source: uws, offset: 268, length: 3, token: Token::Word(Word::Word("位".to_string())) },
+                PositionalToken { source: uws, offset: 271, length: 3, token: Token::Word(Word::Word("拥".to_string())) },
+                PositionalToken { source: uws, offset: 274, length: 3, token: Token::Word(Word::Word("有".to_string())) },
+                PositionalToken { source: uws, offset: 277, length: 3, token: Token::Word(Word::Word("超".to_string())) },
                 ],
             Lang::Jpn => vec![
-                PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word("熊".to_string()) },
-                PositionalToken { source: uws, offset: 3, length: 3, token: Token::Word("野".to_string()) },
-                PositionalToken { source: uws, offset: 6, length: 3, token: Token::Word("三".to_string()) },
-                PositionalToken { source: uws, offset: 9, length: 3, token: Token::Word("山".to_string()) },
-                PositionalToken { source: uws, offset: 12, length: 3, token: Token::Word("本".to_string()) },
-                PositionalToken { source: uws, offset: 15, length: 3, token: Token::Word("願".to_string()) },
-                PositionalToken { source: uws, offset: 18, length: 3, token: Token::Word("所".to_string()) },
-                PositionalToken { source: uws, offset: 21, length: 3, token: Token::Word("は".to_string()) },
-                PositionalToken { source: uws, offset: 24, length: 3, token: Token::Punctuation("、".to_string()) },
-                PositionalToken { source: uws, offset: 27, length: 2, token: Token::Number(Number::Integer(15)) },
-                PositionalToken { source: uws, offset: 29, length: 3, token: Token::Word("世".to_string()) },
-                PositionalToken { source: uws, offset: 32, length: 3, token: Token::Word("紀".to_string()) },
-                PositionalToken { source: uws, offset: 35, length: 3, token: Token::Word("末".to_string()) },
-                PositionalToken { source: uws, offset: 38, length: 3, token: Token::Word("以".to_string()) },
-                PositionalToken { source: uws, offset: 41, length: 3, token: Token::Word("降".to_string()) },
-                PositionalToken { source: uws, offset: 44, length: 3, token: Token::Word("に".to_string()) },
-                PositionalToken { source: uws, offset: 47, length: 3, token: Token::Word("お".to_string()) },
-                PositionalToken { source: uws, offset: 50, length: 3, token: Token::Word("け".to_string()) },
-                PositionalToken { source: uws, offset: 53, length: 3, token: Token::Word("る".to_string()) },
-                PositionalToken { source: uws, offset: 56, length: 3, token: Token::Word("熊".to_string()) },
-                PositionalToken { source: uws, offset: 59, length: 3, token: Token::Word("野".to_string()) },
-                PositionalToken { source: uws, offset: 62, length: 3, token: Token::Word("三".to_string()) },
-                PositionalToken { source: uws, offset: 65, length: 3, token: Token::Word("山".to_string()) },
-                PositionalToken { source: uws, offset: 68, length: 3, token: Token::Punctuation("（".to_string()) },
-                PositionalToken { source: uws, offset: 71, length: 3, token: Token::Word("熊".to_string()) },
-                PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word("野".to_string()) },
-                PositionalToken { source: uws, offset: 77, length: 3, token: Token::Word("本".to_string()) },
-                PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word("宮".to_string()) },
-                PositionalToken { source: uws, offset: 83, length: 3, token: Token::Punctuation("、".to_string()) },
-                PositionalToken { source: uws, offset: 86, length: 3, token: Token::Word("熊".to_string()) },
-                PositionalToken { source: uws, offset: 89, length: 3, token: Token::Word("野".to_string()) },
-                PositionalToken { source: uws, offset: 92, length: 3, token: Token::Word("新".to_string()) },
-                PositionalToken { source: uws, offset: 95, length: 3, token: Token::Word("宮".to_string()) },
-                PositionalToken { source: uws, offset: 98, length: 3, token: Token::Punctuation("、".to_string()) },
-                PositionalToken { source: uws, offset: 101, length: 3, token: Token::Word("熊".to_string()) },
-                PositionalToken { source: uws, offset: 104, length: 3, token: Token::Word("野".to_string()) },
-                PositionalToken { source: uws, offset: 107, length: 3, token: Token::Word("那".to_string()) },
-                PositionalToken { source: uws, offset: 110, length: 3, token: Token::Word("智".to_string()) },
-                PositionalToken { source: uws, offset: 113, length: 3, token: Token::Punctuation("）".to_string()) },
-                PositionalToken { source: uws, offset: 116, length: 3, token: Token::Word("の".to_string()) },
-                PositionalToken { source: uws, offset: 119, length: 3, token: Token::Word("造".to_string()) },
-                PositionalToken { source: uws, offset: 122, length: 3, token: Token::Word("営".to_string()) },
-                PositionalToken { source: uws, offset: 125, length: 3, token: Token::Punctuation("・".to_string()) },
-                PositionalToken { source: uws, offset: 128, length: 3, token: Token::Word("修".to_string()) },
-                PositionalToken { source: uws, offset: 131, length: 3, token: Token::Word("造".to_string()) },
-                PositionalToken { source: uws, offset: 134, length: 3, token: Token::Word("の".to_string()) },
-                PositionalToken { source: uws, offset: 137, length: 3, token: Token::Word("た".to_string()) },
-                PositionalToken { source: uws, offset: 140, length: 3, token: Token::Word("め".to_string()) },
-                PositionalToken { source: uws, offset: 143, length: 3, token: Token::Word("の".to_string()) },
-                PositionalToken { source: uws, offset: 146, length: 3, token: Token::Word("勧".to_string()) },
-                PositionalToken { source: uws, offset: 149, length: 3, token: Token::Word("進".to_string()) },
-                PositionalToken { source: uws, offset: 152, length: 3, token: Token::Word("を".to_string()) },
-                PositionalToken { source: uws, offset: 155, length: 3, token: Token::Word("担".to_string()) },
-                PositionalToken { source: uws, offset: 158, length: 3, token: Token::Word("っ".to_string()) },
-                PositionalToken { source: uws, offset: 161, length: 3, token: Token::Word("た".to_string()) },
-                PositionalToken { source: uws, offset: 164, length: 3, token: Token::Word("組".to_string()) },
-                PositionalToken { source: uws, offset: 167, length: 3, token: Token::Word("織".to_string()) },
-                PositionalToken { source: uws, offset: 170, length: 3, token: Token::Word("の".to_string()) },
-                PositionalToken { source: uws, offset: 173, length: 3, token: Token::Word("総".to_string()) },
-                PositionalToken { source: uws, offset: 176, length: 3, token: Token::Word("称".to_string()) },
-                PositionalToken { source: uws, offset: 179, length: 3, token: Token::Punctuation("。".to_string()) },
-                PositionalToken { source: uws, offset: 182, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 183, length: 3, token: Token::Word("熊".to_string()) },
-                PositionalToken { source: uws, offset: 186, length: 3, token: Token::Word("野".to_string()) },
-                PositionalToken { source: uws, offset: 189, length: 3, token: Token::Word("三".to_string()) },
-                PositionalToken { source: uws, offset: 192, length: 3, token: Token::Word("山".to_string()) },
-                PositionalToken { source: uws, offset: 195, length: 3, token: Token::Word("を".to_string()) },
-                PositionalToken { source: uws, offset: 198, length: 3, token: Token::Word("含".to_string()) },
-                PositionalToken { source: uws, offset: 201, length: 3, token: Token::Word("め".to_string()) },
-                PositionalToken { source: uws, offset: 204, length: 3, token: Token::Word("て".to_string()) },
-                PositionalToken { source: uws, offset: 207, length: 3, token: Token::Punctuation("、".to_string()) },
-                PositionalToken { source: uws, offset: 210, length: 3, token: Token::Word("日".to_string()) },
-                PositionalToken { source: uws, offset: 213, length: 3, token: Token::Word("本".to_string()) },
-                PositionalToken { source: uws, offset: 216, length: 3, token: Token::Word("に".to_string()) },
-                PositionalToken { source: uws, offset: 219, length: 3, token: Token::Word("お".to_string()) },
-                PositionalToken { source: uws, offset: 222, length: 3, token: Token::Word("け".to_string()) },
-                PositionalToken { source: uws, offset: 225, length: 3, token: Token::Word("る".to_string()) },
-                PositionalToken { source: uws, offset: 228, length: 3, token: Token::Word("古".to_string()) },
-                PositionalToken { source: uws, offset: 231, length: 3, token: Token::Word("代".to_string()) },
-                PositionalToken { source: uws, offset: 234, length: 3, token: Token::Word("か".to_string()) },
-                PositionalToken { source: uws, offset: 237, length: 3, token: Token::Word("ら".to_string()) },
-                PositionalToken { source: uws, offset: 240, length: 3, token: Token::Word("中".to_string()) },
-                PositionalToken { source: uws, offset: 243, length: 3, token: Token::Word("世".to_string()) },
-                PositionalToken { source: uws, offset: 246, length: 3, token: Token::Word("前".to_string()) },
-                PositionalToken { source: uws, offset: 249, length: 3, token: Token::Word("半".to_string()) },
-                PositionalToken { source: uws, offset: 252, length: 3, token: Token::Word("に".to_string()) },
-                PositionalToken { source: uws, offset: 255, length: 3, token: Token::Word("か".to_string()) },
-                PositionalToken { source: uws, offset: 258, length: 3, token: Token::Word("け".to_string()) },
-                PositionalToken { source: uws, offset: 261, length: 3, token: Token::Word("て".to_string()) },
-                PositionalToken { source: uws, offset: 264, length: 3, token: Token::Word("の".to_string()) },
-                PositionalToken { source: uws, offset: 267, length: 3, token: Token::Word("寺".to_string()) },
-                PositionalToken { source: uws, offset: 270, length: 3, token: Token::Word("社".to_string()) },
-                PositionalToken { source: uws, offset: 273, length: 3, token: Token::Word("の".to_string()) },
-                PositionalToken { source: uws, offset: 276, length: 3, token: Token::Word("造".to_string()) },
-                PositionalToken { source: uws, offset: 279, length: 3, token: Token::Word("営".to_string()) },
-                PositionalToken { source: uws, offset: 282, length: 3, token: Token::Word("は".to_string()) },
-                PositionalToken { source: uws, offset: 285, length: 3, token: Token::Punctuation("、".to_string()) },
-                PositionalToken { source: uws, offset: 288, length: 3, token: Token::Word("寺".to_string()) },
-                PositionalToken { source: uws, offset: 291, length: 3, token: Token::Word("社".to_string()) },
+                PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Word("熊".to_string())) },
+                PositionalToken { source: uws, offset: 3, length: 3, token: Token::Word(Word::Word("野".to_string())) },
+                PositionalToken { source: uws, offset: 6, length: 3, token: Token::Word(Word::Word("三".to_string())) },
+                PositionalToken { source: uws, offset: 9, length: 3, token: Token::Word(Word::Word("山".to_string())) },
+                PositionalToken { source: uws, offset: 12, length: 3, token: Token::Word(Word::Word("本".to_string())) },
+                PositionalToken { source: uws, offset: 15, length: 3, token: Token::Word(Word::Word("願".to_string())) },
+                PositionalToken { source: uws, offset: 18, length: 3, token: Token::Word(Word::Word("所".to_string())) },
+                PositionalToken { source: uws, offset: 21, length: 3, token: Token::Word(Word::Word("は".to_string())) },
+                PositionalToken { source: uws, offset: 24, length: 3, token: Token::Special(Special::Punctuation("、".to_string())) },
+                PositionalToken { source: uws, offset: 27, length: 2, token: Token::Word(Word::Number(Number::Integer(15))) },
+                PositionalToken { source: uws, offset: 29, length: 3, token: Token::Word(Word::Word("世".to_string())) },
+                PositionalToken { source: uws, offset: 32, length: 3, token: Token::Word(Word::Word("紀".to_string())) },
+                PositionalToken { source: uws, offset: 35, length: 3, token: Token::Word(Word::Word("末".to_string())) },
+                PositionalToken { source: uws, offset: 38, length: 3, token: Token::Word(Word::Word("以".to_string())) },
+                PositionalToken { source: uws, offset: 41, length: 3, token: Token::Word(Word::Word("降".to_string())) },
+                PositionalToken { source: uws, offset: 44, length: 3, token: Token::Word(Word::Word("に".to_string())) },
+                PositionalToken { source: uws, offset: 47, length: 3, token: Token::Word(Word::Word("お".to_string())) },
+                PositionalToken { source: uws, offset: 50, length: 3, token: Token::Word(Word::Word("け".to_string())) },
+                PositionalToken { source: uws, offset: 53, length: 3, token: Token::Word(Word::Word("る".to_string())) },
+                PositionalToken { source: uws, offset: 56, length: 3, token: Token::Word(Word::Word("熊".to_string())) },
+                PositionalToken { source: uws, offset: 59, length: 3, token: Token::Word(Word::Word("野".to_string())) },
+                PositionalToken { source: uws, offset: 62, length: 3, token: Token::Word(Word::Word("三".to_string())) },
+                PositionalToken { source: uws, offset: 65, length: 3, token: Token::Word(Word::Word("山".to_string())) },
+                PositionalToken { source: uws, offset: 68, length: 3, token: Token::Special(Special::Punctuation("（".to_string())) },
+                PositionalToken { source: uws, offset: 71, length: 3, token: Token::Word(Word::Word("熊".to_string())) },
+                PositionalToken { source: uws, offset: 74, length: 3, token: Token::Word(Word::Word("野".to_string())) },
+                PositionalToken { source: uws, offset: 77, length: 3, token: Token::Word(Word::Word("本".to_string())) },
+                PositionalToken { source: uws, offset: 80, length: 3, token: Token::Word(Word::Word("宮".to_string())) },
+                PositionalToken { source: uws, offset: 83, length: 3, token: Token::Special(Special::Punctuation("、".to_string())) },
+                PositionalToken { source: uws, offset: 86, length: 3, token: Token::Word(Word::Word("熊".to_string())) },
+                PositionalToken { source: uws, offset: 89, length: 3, token: Token::Word(Word::Word("野".to_string())) },
+                PositionalToken { source: uws, offset: 92, length: 3, token: Token::Word(Word::Word("新".to_string())) },
+                PositionalToken { source: uws, offset: 95, length: 3, token: Token::Word(Word::Word("宮".to_string())) },
+                PositionalToken { source: uws, offset: 98, length: 3, token: Token::Special(Special::Punctuation("、".to_string())) },
+                PositionalToken { source: uws, offset: 101, length: 3, token: Token::Word(Word::Word("熊".to_string())) },
+                PositionalToken { source: uws, offset: 104, length: 3, token: Token::Word(Word::Word("野".to_string())) },
+                PositionalToken { source: uws, offset: 107, length: 3, token: Token::Word(Word::Word("那".to_string())) },
+                PositionalToken { source: uws, offset: 110, length: 3, token: Token::Word(Word::Word("智".to_string())) },
+                PositionalToken { source: uws, offset: 113, length: 3, token: Token::Special(Special::Punctuation("）".to_string())) },
+                PositionalToken { source: uws, offset: 116, length: 3, token: Token::Word(Word::Word("の".to_string())) },
+                PositionalToken { source: uws, offset: 119, length: 3, token: Token::Word(Word::Word("造".to_string())) },
+                PositionalToken { source: uws, offset: 122, length: 3, token: Token::Word(Word::Word("営".to_string())) },
+                PositionalToken { source: uws, offset: 125, length: 3, token: Token::Special(Special::Punctuation("・".to_string())) },
+                PositionalToken { source: uws, offset: 128, length: 3, token: Token::Word(Word::Word("修".to_string())) },
+                PositionalToken { source: uws, offset: 131, length: 3, token: Token::Word(Word::Word("造".to_string())) },
+                PositionalToken { source: uws, offset: 134, length: 3, token: Token::Word(Word::Word("の".to_string())) },
+                PositionalToken { source: uws, offset: 137, length: 3, token: Token::Word(Word::Word("た".to_string())) },
+                PositionalToken { source: uws, offset: 140, length: 3, token: Token::Word(Word::Word("め".to_string())) },
+                PositionalToken { source: uws, offset: 143, length: 3, token: Token::Word(Word::Word("の".to_string())) },
+                PositionalToken { source: uws, offset: 146, length: 3, token: Token::Word(Word::Word("勧".to_string())) },
+                PositionalToken { source: uws, offset: 149, length: 3, token: Token::Word(Word::Word("進".to_string())) },
+                PositionalToken { source: uws, offset: 152, length: 3, token: Token::Word(Word::Word("を".to_string())) },
+                PositionalToken { source: uws, offset: 155, length: 3, token: Token::Word(Word::Word("担".to_string())) },
+                PositionalToken { source: uws, offset: 158, length: 3, token: Token::Word(Word::Word("っ".to_string())) },
+                PositionalToken { source: uws, offset: 161, length: 3, token: Token::Word(Word::Word("た".to_string())) },
+                PositionalToken { source: uws, offset: 164, length: 3, token: Token::Word(Word::Word("組".to_string())) },
+                PositionalToken { source: uws, offset: 167, length: 3, token: Token::Word(Word::Word("織".to_string())) },
+                PositionalToken { source: uws, offset: 170, length: 3, token: Token::Word(Word::Word("の".to_string())) },
+                PositionalToken { source: uws, offset: 173, length: 3, token: Token::Word(Word::Word("総".to_string())) },
+                PositionalToken { source: uws, offset: 176, length: 3, token: Token::Word(Word::Word("称".to_string())) },
+                PositionalToken { source: uws, offset: 179, length: 3, token: Token::Special(Special::Punctuation("。".to_string())) },
+                PositionalToken { source: uws, offset: 182, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 183, length: 3, token: Token::Word(Word::Word("熊".to_string())) },
+                PositionalToken { source: uws, offset: 186, length: 3, token: Token::Word(Word::Word("野".to_string())) },
+                PositionalToken { source: uws, offset: 189, length: 3, token: Token::Word(Word::Word("三".to_string())) },
+                PositionalToken { source: uws, offset: 192, length: 3, token: Token::Word(Word::Word("山".to_string())) },
+                PositionalToken { source: uws, offset: 195, length: 3, token: Token::Word(Word::Word("を".to_string())) },
+                PositionalToken { source: uws, offset: 198, length: 3, token: Token::Word(Word::Word("含".to_string())) },
+                PositionalToken { source: uws, offset: 201, length: 3, token: Token::Word(Word::Word("め".to_string())) },
+                PositionalToken { source: uws, offset: 204, length: 3, token: Token::Word(Word::Word("て".to_string())) },
+                PositionalToken { source: uws, offset: 207, length: 3, token: Token::Special(Special::Punctuation("、".to_string())) },
+                PositionalToken { source: uws, offset: 210, length: 3, token: Token::Word(Word::Word("日".to_string())) },
+                PositionalToken { source: uws, offset: 213, length: 3, token: Token::Word(Word::Word("本".to_string())) },
+                PositionalToken { source: uws, offset: 216, length: 3, token: Token::Word(Word::Word("に".to_string())) },
+                PositionalToken { source: uws, offset: 219, length: 3, token: Token::Word(Word::Word("お".to_string())) },
+                PositionalToken { source: uws, offset: 222, length: 3, token: Token::Word(Word::Word("け".to_string())) },
+                PositionalToken { source: uws, offset: 225, length: 3, token: Token::Word(Word::Word("る".to_string())) },
+                PositionalToken { source: uws, offset: 228, length: 3, token: Token::Word(Word::Word("古".to_string())) },
+                PositionalToken { source: uws, offset: 231, length: 3, token: Token::Word(Word::Word("代".to_string())) },
+                PositionalToken { source: uws, offset: 234, length: 3, token: Token::Word(Word::Word("か".to_string())) },
+                PositionalToken { source: uws, offset: 237, length: 3, token: Token::Word(Word::Word("ら".to_string())) },
+                PositionalToken { source: uws, offset: 240, length: 3, token: Token::Word(Word::Word("中".to_string())) },
+                PositionalToken { source: uws, offset: 243, length: 3, token: Token::Word(Word::Word("世".to_string())) },
+                PositionalToken { source: uws, offset: 246, length: 3, token: Token::Word(Word::Word("前".to_string())) },
+                PositionalToken { source: uws, offset: 249, length: 3, token: Token::Word(Word::Word("半".to_string())) },
+                PositionalToken { source: uws, offset: 252, length: 3, token: Token::Word(Word::Word("に".to_string())) },
+                PositionalToken { source: uws, offset: 255, length: 3, token: Token::Word(Word::Word("か".to_string())) },
+                PositionalToken { source: uws, offset: 258, length: 3, token: Token::Word(Word::Word("け".to_string())) },
+                PositionalToken { source: uws, offset: 261, length: 3, token: Token::Word(Word::Word("て".to_string())) },
+                PositionalToken { source: uws, offset: 264, length: 3, token: Token::Word(Word::Word("の".to_string())) },
+                PositionalToken { source: uws, offset: 267, length: 3, token: Token::Word(Word::Word("寺".to_string())) },
+                PositionalToken { source: uws, offset: 270, length: 3, token: Token::Word(Word::Word("社".to_string())) },
+                PositionalToken { source: uws, offset: 273, length: 3, token: Token::Word(Word::Word("の".to_string())) },
+                PositionalToken { source: uws, offset: 276, length: 3, token: Token::Word(Word::Word("造".to_string())) },
+                PositionalToken { source: uws, offset: 279, length: 3, token: Token::Word(Word::Word("営".to_string())) },
+                PositionalToken { source: uws, offset: 282, length: 3, token: Token::Word(Word::Word("は".to_string())) },
+                PositionalToken { source: uws, offset: 285, length: 3, token: Token::Special(Special::Punctuation("、".to_string())) },
+                PositionalToken { source: uws, offset: 288, length: 3, token: Token::Word(Word::Word("寺".to_string())) },
+                PositionalToken { source: uws, offset: 291, length: 3, token: Token::Word(Word::Word("社".to_string())) },
                 ],
             Lang::Kor => vec![
-                PositionalToken { source: uws, offset: 0, length: 21, token: Token::Word("플레이스테이션".to_string()) },
-                PositionalToken { source: uws, offset: 21, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 22, length: 3, token: Token::Word("은".to_string()) },
-                PositionalToken { source: uws, offset: 25, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 26, length: 6, token: Token::Word("소니".to_string()) },
-                PositionalToken { source: uws, offset: 32, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 33, length: 9, token: Token::Word("컴퓨터".to_string()) },
-                PositionalToken { source: uws, offset: 42, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 43, length: 21, token: Token::Word("엔터테인먼트가".to_string()) },
-                PositionalToken { source: uws, offset: 64, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 65, length: 9, token: Token::Word("개발한".to_string()) },
-                PositionalToken { source: uws, offset: 74, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 75, length: 3, token: Token::Word("세".to_string()) },
-                PositionalToken { source: uws, offset: 78, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 79, length: 6, token: Token::Word("번째".to_string()) },
-                PositionalToken { source: uws, offset: 85, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 86, length: 9, token: Token::Word("가정용".to_string()) },
-                PositionalToken { source: uws, offset: 95, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 96, length: 15, token: Token::Word("게임기이다".to_string()) },
-                PositionalToken { source: uws, offset: 111, length: 1, token: Token::Punctuation(".".to_string()) },
-                PositionalToken { source: uws, offset: 112, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 113, length: 24, token: Token::Word("마이크로소프트의".to_string()) },
-                PositionalToken { source: uws, offset: 137, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 138, length: 12, token: Token::Word("엑스박스".to_string()) },
-                PositionalToken { source: uws, offset: 150, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 151, length: 3, token: Token::Number(Number::Integer(360)) },
-                PositionalToken { source: uws, offset: 154, length: 1, token: Token::Punctuation(",".to_string()) },
-                PositionalToken { source: uws, offset: 155, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 156, length: 12, token: Token::Word("닌텐도의".to_string()) },
-                PositionalToken { source: uws, offset: 168, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 169, length: 6, token: Token::Word("Wii와".to_string()) },
-                PositionalToken { source: uws, offset: 175, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 176, length: 12, token: Token::Word("경쟁하고".to_string()) },
-                PositionalToken { source: uws, offset: 188, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 189, length: 6, token: Token::Word("있다".to_string()) },
-                PositionalToken { source: uws, offset: 195, length: 1, token: Token::Punctuation(".".to_string()) },
-                PositionalToken { source: uws, offset: 196, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 197, length: 6, token: Token::Word("이전".to_string()) },
-                PositionalToken { source: uws, offset: 203, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 204, length: 12, token: Token::Word("제품에서".to_string()) },
-                PositionalToken { source: uws, offset: 216, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 217, length: 9, token: Token::Word("온라인".to_string()) },
-                PositionalToken { source: uws, offset: 226, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 227, length: 9, token: Token::Word("플레이".to_string()) },
-                PositionalToken { source: uws, offset: 236, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 237, length: 3, token: Token::Word("기".to_string()) },
+                PositionalToken { source: uws, offset: 0, length: 21, token: Token::Word(Word::Word("플레이스테이션".to_string())) },
+                PositionalToken { source: uws, offset: 21, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 22, length: 3, token: Token::Word(Word::Word("은".to_string())) },
+                PositionalToken { source: uws, offset: 25, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 26, length: 6, token: Token::Word(Word::Word("소니".to_string())) },
+                PositionalToken { source: uws, offset: 32, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 33, length: 9, token: Token::Word(Word::Word("컴퓨터".to_string())) },
+                PositionalToken { source: uws, offset: 42, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 43, length: 21, token: Token::Word(Word::Word("엔터테인먼트가".to_string())) },
+                PositionalToken { source: uws, offset: 64, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 65, length: 9, token: Token::Word(Word::Word("개발한".to_string())) },
+                PositionalToken { source: uws, offset: 74, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 75, length: 3, token: Token::Word(Word::Word("세".to_string())) },
+                PositionalToken { source: uws, offset: 78, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 79, length: 6, token: Token::Word(Word::Word("번째".to_string())) },
+                PositionalToken { source: uws, offset: 85, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 86, length: 9, token: Token::Word(Word::Word("가정용".to_string())) },
+                PositionalToken { source: uws, offset: 95, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 96, length: 15, token: Token::Word(Word::Word("게임기이다".to_string())) },
+                PositionalToken { source: uws, offset: 111, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+                PositionalToken { source: uws, offset: 112, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 113, length: 24, token: Token::Word(Word::Word("마이크로소프트의".to_string())) },
+                PositionalToken { source: uws, offset: 137, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 138, length: 12, token: Token::Word(Word::Word("엑스박스".to_string())) },
+                PositionalToken { source: uws, offset: 150, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 151, length: 3, token: Token::Word(Word::Number(Number::Integer(360))) },
+                PositionalToken { source: uws, offset: 154, length: 1, token: Token::Special(Special::Punctuation(",".to_string())) },
+                PositionalToken { source: uws, offset: 155, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 156, length: 12, token: Token::Word(Word::Word("닌텐도의".to_string())) },
+                PositionalToken { source: uws, offset: 168, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 169, length: 6, token: Token::Word(Word::Word("Wii와".to_string())) },
+                PositionalToken { source: uws, offset: 175, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 176, length: 12, token: Token::Word(Word::Word("경쟁하고".to_string())) },
+                PositionalToken { source: uws, offset: 188, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 189, length: 6, token: Token::Word(Word::Word("있다".to_string())) },
+                PositionalToken { source: uws, offset: 195, length: 1, token: Token::Special(Special::Punctuation(".".to_string())) },
+                PositionalToken { source: uws, offset: 196, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 197, length: 6, token: Token::Word(Word::Word("이전".to_string())) },
+                PositionalToken { source: uws, offset: 203, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 204, length: 12, token: Token::Word(Word::Word("제품에서".to_string())) },
+                PositionalToken { source: uws, offset: 216, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 217, length: 9, token: Token::Word(Word::Word("온라인".to_string())) },
+                PositionalToken { source: uws, offset: 226, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 227, length: 9, token: Token::Word(Word::Word("플레이".to_string())) },
+                PositionalToken { source: uws, offset: 236, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 237, length: 3, token: Token::Word(Word::Word("기".to_string())) },
                 ],
             Lang::Ara => vec![
-                PositionalToken { source: uws, offset: 0, length: 14, token: Token::Word("لشکرکشی".to_string()) },
-                PositionalToken { source: uws, offset: 14, length: 3, token: Token::UnicodeFormatter(Formatter::Char('\u{200c}')) },
-                PositionalToken { source: uws, offset: 17, length: 6, token: Token::Word("های".to_string()) },
-                PositionalToken { source: uws, offset: 23, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 24, length: 6, token: Token::Word("روس".to_string()) },
-                PositionalToken { source: uws, offset: 30, length: 3, token: Token::UnicodeFormatter(Formatter::Char('\u{200c}')) },
-                PositionalToken { source: uws, offset: 33, length: 6, token: Token::Word("های".to_string()) },
-                PositionalToken { source: uws, offset: 39, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 40, length: 12, token: Token::Word("وارنگی".to_string()) },
-                PositionalToken { source: uws, offset: 52, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 53, length: 4, token: Token::Word("به".to_string()) },
-                PositionalToken { source: uws, offset: 57, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 58, length: 10, token: Token::Word("دریای".to_string()) },
-                PositionalToken { source: uws, offset: 68, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 69, length: 6, token: Token::Word("خزر".to_string()) },
-                PositionalToken { source: uws, offset: 75, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 76, length: 12, token: Token::Word("مجموعه".to_string()) },
-                PositionalToken { source: uws, offset: 88, length: 3, token: Token::UnicodeFormatter(Formatter::Char('\u{200c}')) },
-                PositionalToken { source: uws, offset: 91, length: 4, token: Token::Word("ای".to_string()) },
-                PositionalToken { source: uws, offset: 95, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 96, length: 4, token: Token::Word("از".to_string()) },
-                PositionalToken { source: uws, offset: 100, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 101, length: 10, token: Token::Word("حملات".to_string()) },
-                PositionalToken { source: uws, offset: 111, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 112, length: 10, token: Token::Word("نظامی".to_string()) },
-                PositionalToken { source: uws, offset: 122, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 123, length: 4, token: Token::Word("در".to_string()) },
-                PositionalToken { source: uws, offset: 127, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 128, length: 6, token: Token::Word("بین".to_string()) },
-                PositionalToken { source: uws, offset: 134, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 135, length: 6, token: Token::Word("سال".to_string()) },
-                PositionalToken { source: uws, offset: 141, length: 3, token: Token::UnicodeFormatter(Formatter::Char('\u{200c}')) },
-                PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word("های".to_string()) },
-                PositionalToken { source: uws, offset: 150, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 151, length: 6, token: Token::StrangeWord("۸۶۴".to_string()) },
-                PositionalToken { source: uws, offset: 157, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 158, length: 4, token: Token::Word("تا".to_string()) },
-                PositionalToken { source: uws, offset: 162, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 163, length: 8, token: Token::StrangeWord("۱۰۴۱".to_string()) },
-                PositionalToken { source: uws, offset: 171, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 172, length: 12, token: Token::Word("میلادی".to_string()) },
-                PositionalToken { source: uws, offset: 184, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 185, length: 2, token: Token::Word("ب".to_string()) },
+                PositionalToken { source: uws, offset: 0, length: 14, token: Token::Word(Word::Word("لشکرکشی".to_string())) },
+                PositionalToken { source: uws, offset: 14, length: 3, token: Token::Unicode(Unicode::Formatter(Formatter::Char('\u{200c}'))) },
+                PositionalToken { source: uws, offset: 17, length: 6, token: Token::Word(Word::Word("های".to_string())) },
+                PositionalToken { source: uws, offset: 23, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 24, length: 6, token: Token::Word(Word::Word("روس".to_string())) },
+                PositionalToken { source: uws, offset: 30, length: 3, token: Token::Unicode(Unicode::Formatter(Formatter::Char('\u{200c}'))) },
+                PositionalToken { source: uws, offset: 33, length: 6, token: Token::Word(Word::Word("های".to_string())) },
+                PositionalToken { source: uws, offset: 39, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 40, length: 12, token: Token::Word(Word::Word("وارنگی".to_string())) },
+                PositionalToken { source: uws, offset: 52, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 53, length: 4, token: Token::Word(Word::Word("به".to_string())) },
+                PositionalToken { source: uws, offset: 57, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 58, length: 10, token: Token::Word(Word::Word("دریای".to_string())) },
+                PositionalToken { source: uws, offset: 68, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 69, length: 6, token: Token::Word(Word::Word("خزر".to_string())) },
+                PositionalToken { source: uws, offset: 75, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 76, length: 12, token: Token::Word(Word::Word("مجموعه".to_string())) },
+                PositionalToken { source: uws, offset: 88, length: 3, token: Token::Unicode(Unicode::Formatter(Formatter::Char('\u{200c}'))) },
+                PositionalToken { source: uws, offset: 91, length: 4, token: Token::Word(Word::Word("ای".to_string())) },
+                PositionalToken { source: uws, offset: 95, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 96, length: 4, token: Token::Word(Word::Word("از".to_string())) },
+                PositionalToken { source: uws, offset: 100, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 101, length: 10, token: Token::Word(Word::Word("حملات".to_string())) },
+                PositionalToken { source: uws, offset: 111, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 112, length: 10, token: Token::Word(Word::Word("نظامی".to_string())) },
+                PositionalToken { source: uws, offset: 122, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 123, length: 4, token: Token::Word(Word::Word("در".to_string())) },
+                PositionalToken { source: uws, offset: 127, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 128, length: 6, token: Token::Word(Word::Word("بین".to_string())) },
+                PositionalToken { source: uws, offset: 134, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 135, length: 6, token: Token::Word(Word::Word("سال".to_string())) },
+                PositionalToken { source: uws, offset: 141, length: 3, token: Token::Unicode(Unicode::Formatter(Formatter::Char('\u{200c}'))) },
+                PositionalToken { source: uws, offset: 144, length: 6, token: Token::Word(Word::Word("های".to_string())) },
+                PositionalToken { source: uws, offset: 150, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 151, length: 6, token: Token::Word(Word::StrangeWord("۸۶۴".to_string())) },
+                PositionalToken { source: uws, offset: 157, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 158, length: 4, token: Token::Word(Word::Word("تا".to_string())) },
+                PositionalToken { source: uws, offset: 162, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 163, length: 8, token: Token::Word(Word::StrangeWord("۱۰۴۱".to_string())) },
+                PositionalToken { source: uws, offset: 171, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 172, length: 12, token: Token::Word(Word::Word("میلادی".to_string())) },
+                PositionalToken { source: uws, offset: 184, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 185, length: 2, token: Token::Word(Word::Word("ب".to_string())) },
                 ],
             Lang::Ell => vec![
-                PositionalToken { source: uws, offset: 0, length: 4, token: Token::Word("Το".to_string()) },
-                PositionalToken { source: uws, offset: 4, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 5, length: 18, token: Token::Word("Πρόγραμμα".to_string()) },
-                PositionalToken { source: uws, offset: 23, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 24, length: 22, token: Token::Word("υλοποιείται".to_string()) },
-                PositionalToken { source: uws, offset: 46, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 47, length: 4, token: Token::Word("εξ".to_string()) },
-                PositionalToken { source: uws, offset: 51, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 52, length: 18, token: Token::Word("ολοκλήρου".to_string()) },
-                PositionalToken { source: uws, offset: 70, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 71, length: 6, token: Token::Word("από".to_string()) },
-                PositionalToken { source: uws, offset: 77, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 78, length: 16, token: Token::Word("απόσταση".to_string()) },
-                PositionalToken { source: uws, offset: 94, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 95, length: 6, token: Token::Word("και".to_string()) },
-                PositionalToken { source: uws, offset: 101, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 102, length: 12, token: Token::Word("μπορεί".to_string()) },
-                PositionalToken { source: uws, offset: 114, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 115, length: 4, token: Token::Word("να".to_string()) },
-                PositionalToken { source: uws, offset: 119, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 120, length: 20, token: Token::Word("συμμετέχει".to_string()) },
-                PositionalToken { source: uws, offset: 140, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 141, length: 8, token: Token::Word("κάθε".to_string()) },
-                PositionalToken { source: uws, offset: 149, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 150, length: 24, token: Token::Word("εμπλεκόμενος".to_string()) },
-                PositionalToken { source: uws, offset: 174, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 175, length: 6, token: Token::Word("στη".to_string()) },
-                PositionalToken { source: uws, offset: 181, length: 1, token: Token::Separator(Separator::Space) },
-                PositionalToken { source: uws, offset: 182, length: 2, token: Token::Word("ή".to_string()) },
-                PositionalToken { source: uws, offset: 184, length: 1, token: Token::Punctuation("/".to_string()) },
+                PositionalToken { source: uws, offset: 0, length: 4, token: Token::Word(Word::Word("Το".to_string())) },
+                PositionalToken { source: uws, offset: 4, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 5, length: 18, token: Token::Word(Word::Word("Πρόγραμμα".to_string())) },
+                PositionalToken { source: uws, offset: 23, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 24, length: 22, token: Token::Word(Word::Word("υλοποιείται".to_string())) },
+                PositionalToken { source: uws, offset: 46, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 47, length: 4, token: Token::Word(Word::Word("εξ".to_string())) },
+                PositionalToken { source: uws, offset: 51, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 52, length: 18, token: Token::Word(Word::Word("ολοκλήρου".to_string())) },
+                PositionalToken { source: uws, offset: 70, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 71, length: 6, token: Token::Word(Word::Word("από".to_string())) },
+                PositionalToken { source: uws, offset: 77, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 78, length: 16, token: Token::Word(Word::Word("απόσταση".to_string())) },
+                PositionalToken { source: uws, offset: 94, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 95, length: 6, token: Token::Word(Word::Word("και".to_string())) },
+                PositionalToken { source: uws, offset: 101, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 102, length: 12, token: Token::Word(Word::Word("μπορεί".to_string())) },
+                PositionalToken { source: uws, offset: 114, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 115, length: 4, token: Token::Word(Word::Word("να".to_string())) },
+                PositionalToken { source: uws, offset: 119, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 120, length: 20, token: Token::Word(Word::Word("συμμετέχει".to_string())) },
+                PositionalToken { source: uws, offset: 140, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 141, length: 8, token: Token::Word(Word::Word("κάθε".to_string())) },
+                PositionalToken { source: uws, offset: 149, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 150, length: 24, token: Token::Word(Word::Word("εμπλεκόμενος".to_string())) },
+                PositionalToken { source: uws, offset: 174, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 175, length: 6, token: Token::Word(Word::Word("στη".to_string())) },
+                PositionalToken { source: uws, offset: 181, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+                PositionalToken { source: uws, offset: 182, length: 2, token: Token::Word(Word::Word("ή".to_string())) },
+                PositionalToken { source: uws, offset: 184, length: 1, token: Token::Special(Special::Punctuation("/".to_string())) },
                 ],
         };
         (uws.chars().take(100).fold(String::new(),|acc,c| acc + &format!("{}",c)),tokens)
