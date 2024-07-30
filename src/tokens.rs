@@ -68,20 +68,18 @@ impl<'t> Tokens<'t> {
             allow_structs: if options.contains(&TokenizerOptions::StructTokens) { true } else { false },
         }
     }
-    fn basic_separator_to_pt(&mut self, s: &str) -> Token {
-        Token::Special(Special::Separator(match s.chars().next() {
-            Some(' ') => Separator::Space,
-            Some('\n') => Separator::Newline,
-            Some('\t') => Separator::Tab,
-            Some(c) => Separator::Char(c),
-            None => Separator::Unknown,
+    fn basic_separator_to_pt(&mut self, c: char) -> Token {
+        Token::Special(Special::Separator(match c {
+            ' ' => Separator::Space,
+            '\n' => Separator::Newline,
+            '\t' => Separator::Tab,
+            _ => Separator::Char(c),
         }))
     }
-    fn basic_formater_to_pt(&mut self, s: &str) -> Token {
-        Token::Unicode(Unicode::Formatter(match s.chars().next() {
-            Some('\u{200d}') => Formatter::Joiner,
-            Some(c) => Formatter::Char(c),
-            None => Formatter::Unknown,
+    fn basic_formater_to_pt(&mut self, c: char) -> Token {        
+        Token::Unicode(Unicode::Formatter(match c {
+            '\u{200d}' => Formatter::Joiner,
+            _ => Formatter::Char(c),
         }))
     }   
     fn basic_number_to_pt(&mut self, s: &str) -> Token {
@@ -118,9 +116,9 @@ impl<'t> Tokens<'t> {
         }
         if !first && same && (one_c.is_whitespace() || (one_c.general_category() == GeneralCategory::Format)) {
             if one_c.is_whitespace() {
-                return self.basic_separator_to_pt(s);                       
+                return self.basic_separator_to_pt(one_c);                       
             } else {
-                return self.basic_formater_to_pt(s)
+                return self.basic_formater_to_pt(one_c)
             }
         }
         if word {
@@ -142,16 +140,23 @@ impl<'t> Tokens<'t> {
                             #[cfg(not(feature = "strings"))]
                             { Token::Word(Word::StrangeWord) }  
                         },
-                        false => Token::Unicode(Unicode::String({
-                            let mut us = "".to_string();
-                            for c in rs.chars() {
-                                if us!="" { us += "_"; }
-                                us += "u";
-                                let ns = format!("{}",c.escape_unicode());
-                                us += &ns[3 .. ns.len()-1];
+                        false => {
+                            #[cfg(feature = "strings")]
+                            {
+                                Token::Unicode(Unicode::String({
+                                    let mut us = "".to_string();
+                                    for c in rs.chars() {
+                                        if us!="" { us += "_"; }
+                                        us += "u";
+                                        let ns = format!("{}",c.escape_unicode());
+                                        us += &ns[3 .. ns.len()-1];
+                                    }
+                                    us
+                                }))
                             }
-                            us
-                        })),
+                            #[cfg(not(feature = "strings"))]
+                            { Token::Unicode(Unicode::String) }
+                        },
                     }
                 },
             }
@@ -194,15 +199,24 @@ impl<'t> Tokens<'t> {
         Token::Word(match (digits,digits_begin_only,dots,alphas_and_apos,other) {
             (true,false,true,false,false) => {
                 // TODO: Date, Ip, DotSeparated
-                Word::Numerical(Numerical::DotSeparated(s.to_string()))
+                #[cfg(feature = "strings")]
+                { Word::Numerical(Numerical::DotSeparated(s.to_string())) }
+                #[cfg(not(feature = "strings"))]
+                { Word::Numerical(Numerical::DotSeparated) }
             },
             (true,true,_,true,false) => {
                 // TODO: Countable or Measures
-                Word::Numerical(Numerical::Measures(s.to_string()))
+                #[cfg(feature = "strings")]
+                { Word::Numerical(Numerical::Measures(s.to_string())) }
+                #[cfg(not(feature = "strings"))]
+                { Word::Numerical(Numerical::Measures) }
             },
             (true, _, _, _, _) => {
                 // Numerical trash, ids, etc.
-                Word::Numerical(Numerical::Alphanumeric(s.to_string()))
+                #[cfg(feature = "strings")]
+                { Word::Numerical(Numerical::Alphanumeric(s.to_string())) }
+                #[cfg(not(feature = "strings"))]
+                { Word::Numerical(Numerical::Alphanumeric) }
             }
             (false,false,_,true,false) => {
                 // Word
@@ -221,11 +235,8 @@ impl<'t> Tokens<'t> {
             (false,true,_,_,_) => unreachable!(),
         })
     }
-    fn basic_punctuation_to_pt(&mut self, _s: &str) -> Token {
-        #[cfg(feature = "strings")]
-        { Token::Special(Special::Punctuation(_s.to_string())) }
-        #[cfg(not(feature = "strings"))]
-        { Token::Special(Special::Punctuation) }
+    fn basic_punctuation_to_pt(&mut self, c: char) -> Token {
+        Token::Special(Special::Punctuation(c))
     }
     /*fn check_url(&mut self) -> Option<PositionalToken> {
         if !self.allow_structs { return None; }
@@ -274,8 +285,8 @@ impl<'t> Tokens<'t> {
         let (loc1,s1) = self.buffer[0].into_inner();
         let (loc2,s2) = self.buffer[1].into_inner();
         match (s1,s2) {
-            (BasicToken::Punctuation("#"),BasicToken::Alphanumeric(_s)) |
-            (BasicToken::Punctuation("#"),BasicToken::Number(_s)) => match Local::from_segment(loc1,loc2) {
+            (BasicToken::Punctuation('#'),BasicToken::Alphanumeric(_s)) |
+            (BasicToken::Punctuation('#'),BasicToken::Number(_s)) => match Local::from_segment(loc1,loc2) {
                 Ok(local) => {
                     self.buffer.pop_front();
                     self.buffer.pop_front();
@@ -298,8 +309,8 @@ impl<'t> Tokens<'t> {
         let (loc1,s1) = self.buffer[0].into_inner();
         let (loc2,s2) = self.buffer[1].into_inner();
         match (s1,s2) {
-            (BasicToken::Punctuation("@"),BasicToken::Alphanumeric(_s)) |
-            (BasicToken::Punctuation("@"),BasicToken::Number(_s)) => match Local::from_segment(loc1,loc2) {
+            (BasicToken::Punctuation('@'),BasicToken::Alphanumeric(_s)) |
+            (BasicToken::Punctuation('@'),BasicToken::Number(_s)) => match Local::from_segment(loc1,loc2) {
                 Ok(local) => {
                     self.buffer.pop_front();
                     self.buffer.pop_front();

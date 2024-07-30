@@ -20,9 +20,9 @@ use crate::{
 pub enum BasicToken<'t> {
     Alphanumeric(&'t str),
     Number(&'t str),
-    Punctuation(&'t str),
-    Separator(&'t str),
-    Formatter(&'t str),
+    Punctuation(char),
+    Separator(char),
+    Formatter(char),
     Mixed(&'t str),
 }
 
@@ -184,17 +184,15 @@ impl<'t> WordBreaker<'t> {
                             }
                             self.bounds.next();
                         }
-                        let Snip{ offset: off, length: len } = local.bytes();
-                        let p = &self.initial[off .. off+len];
                         
                         if c.is_ascii_punctuation() || (c.general_category_group() == GeneralCategoryGroup::Punctuation) {
-                            return Some(local.local(BasicToken::Punctuation(p)));
+                            return Some(local.local(BasicToken::Punctuation(c)));
                         }
                         if c.general_category() == GeneralCategory::Format {
-                            return Some(local.local(BasicToken::Formatter(p)));
+                            return Some(local.local(BasicToken::Formatter(c)));
                         }
                         else {
-                            return Some(local.local(BasicToken::Separator(p)));
+                            return Some(local.local(BasicToken::Separator(c)));
                         }
                     }
                 } // if c is one_char_word
