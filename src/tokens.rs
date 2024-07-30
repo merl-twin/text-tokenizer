@@ -221,9 +221,9 @@ impl<'t> Tokens<'t> {
             (false,true,_,_,_) => unreachable!(),
         })
     }
-    fn basic_punctuation_to_pt(&mut self, s: &str) -> Token {
+    fn basic_punctuation_to_pt(&mut self, _s: &str) -> Token {
         #[cfg(feature = "strings")]
-        { Token::Special(Special::Punctuation(s.to_string())) }
+        { Token::Special(Special::Punctuation(_s.to_string())) }
         #[cfg(not(feature = "strings"))]
         { Token::Special(Special::Punctuation) }
     }
@@ -274,15 +274,15 @@ impl<'t> Tokens<'t> {
         let (loc1,s1) = self.buffer[0].into_inner();
         let (loc2,s2) = self.buffer[1].into_inner();
         match (s1,s2) {
-            (BasicToken::Punctuation("#"),BasicToken::Alphanumeric(s)) |
-            (BasicToken::Punctuation("#"),BasicToken::Number(s)) => match Local::from_segment(loc1,loc2) {
+            (BasicToken::Punctuation("#"),BasicToken::Alphanumeric(_s)) |
+            (BasicToken::Punctuation("#"),BasicToken::Number(_s)) => match Local::from_segment(loc1,loc2) {
                 Ok(local) => {
                     self.buffer.pop_front();
                     self.buffer.pop_front();
                     
                     Some(local.local(Token::Struct({
                         #[cfg(feature = "strings")]
-                        { Struct::Hashtag(s.to_string()) }
+                        { Struct::Hashtag(_s.to_string()) }
                         #[cfg(not(feature = "strings"))]
                         { Struct::Hashtag }
                     })))
@@ -298,15 +298,15 @@ impl<'t> Tokens<'t> {
         let (loc1,s1) = self.buffer[0].into_inner();
         let (loc2,s2) = self.buffer[1].into_inner();
         match (s1,s2) {
-            (BasicToken::Punctuation("@"),BasicToken::Alphanumeric(s)) |
-            (BasicToken::Punctuation("@"),BasicToken::Number(s)) => match Local::from_segment(loc1,loc2) {
+            (BasicToken::Punctuation("@"),BasicToken::Alphanumeric(_s)) |
+            (BasicToken::Punctuation("@"),BasicToken::Number(_s)) => match Local::from_segment(loc1,loc2) {
                 Ok(local) => {
                     self.buffer.pop_front();
                     self.buffer.pop_front();
                     
                     Some(local.local(Token::Struct({
                         #[cfg(feature = "strings")]
-                        { Struct::Mention(s.to_string()) }
+                        { Struct::Mention(_s.to_string()) }
                         #[cfg(not(feature = "strings"))]
                         { Struct::Mention }
                     })))

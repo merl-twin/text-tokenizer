@@ -213,6 +213,9 @@ impl TextToken {
 }
 
 impl TextToken {
+    pub fn as_original_token(&self) -> Option<Local<&Token2>> {
+        self.original.map(|original| original.local(&self.token))
+    }
     pub fn into_original_token(self) -> Option<Local<Token2>> {
         self.original.map(|original| original.local(self.token))
     }
@@ -366,6 +369,7 @@ mod test_v0_5 {
 }
 
 #[cfg(test)]
+#[cfg(feature = "strings")]
 mod test {
     use super::*;
     use text_parsing::{
