@@ -5,7 +5,7 @@ use crate::{
     TokenizerOptions,
     TokenizerParams,
     SentenceBreaker,
-    Text,
+    Text, TextStr,
     IntoTokenizer,
 };
 
@@ -13,6 +13,8 @@ use text_parsing::{
     Breaker, Local, Snip,
     Localize,
 };
+
+use std::borrow::Cow;
 
 #[derive(Debug,Clone)]
 pub(crate) struct InnerBound {
@@ -26,12 +28,37 @@ impl<'t> IntoTokenizer for &'t Text {
     type IntoTokens = TextTokens<'t>;
 
     fn into_tokenizer<S: SentenceBreaker>(self, params: TokenizerParams<S>) -> Self::IntoTokens {
-        TextTokens::new(self, params)
+        TextTokens::new(
+            InnerText {
+                buffer: &self.buffer,
+                originals: Cow::Borrowed(&self.originals),
+            },
+            Cow::Borrowed(&self.breakers),
+            params)
+    }
+}
+impl<'t> IntoTokenizer for TextStr<'t> {
+    type IntoTokens = TextTokens<'t>;
+
+    fn into_tokenizer<S: SentenceBreaker>(self, params: TokenizerParams<S>) -> Self::IntoTokens {
+        TextTokens::new(
+            InnerText {
+                buffer: self.buffer,
+                originals: Cow::Owned(self.originals),
+            },
+            Cow::Owned(self.breakers),
+            params)
     }
 }
 
+struct InnerText<'t> {
+    buffer: &'t str,
+    originals: Cow<'t,Vec<Local<()>>>,
+}
+
 pub struct TextTokens<'t> {
-    text: &'t Text,
+    text: InnerText<'t>,    
+    
     bounds: BoundEnum<'t>,
     current_offset: usize,
     current_char_offset: usize,
@@ -56,7 +83,12 @@ impl<'t> Iterator for BoundEnum<'t> {
     }
 }
 impl<'t> TextTokens<'t> {
-    fn new<S: SentenceBreaker>(text: &Text, params: TokenizerParams<S>) -> TextTokens {
+    pub fn text(&self) -> &'t str {
+        self.text.buffer
+    }
+}
+impl<'t> TextTokens<'t> {
+    fn new<'q,S: SentenceBreaker>(text: InnerText<'q>, breakers: Cow<'q,Vec<InnerBound>>, params: TokenizerParams<S>) -> TextTokens<'q> {
         fn btoc(txt: &str) -> Vec<usize> {
             let mut v = Vec::with_capacity(txt.len());
             v.resize(txt.len(),0);
@@ -71,13 +103,13 @@ impl<'t> TextTokens<'t> {
             v
         }
         
-        let mut bounds = BoundEnum::Iter(text.breakers.iter());
+        let mut bounds = None;
         if params.options.contains(&TokenizerOptions::WithSentences) {
             let mut new_b = Vec::new();
-            let mut cnt = 0;
             let mut offset = 0;
             let mut char_offset = 0;
-            for ib in text.breakers.iter() {
+            let cnt = breakers.len();
+            for ib in breakers.iter() {
                 let InnerBound{ bytes, chars, breaker, original: _ } = ib;
                 if bytes.offset < offset { continue; }
                 match breaker {
@@ -89,7 +121,6 @@ impl<'t> TextTokens<'t> {
                         for snip in params.sentence_breaker.break_text(txt) {
                             //println!("{:?} -> {}",snip, offset + snip.offset);
                             if text.buffer[offset + snip.offset .. offset + snip.offset + snip.length].trim().len() > 0 {
-                                cnt += 1;
                                 new_b.push(InnerBound {
                                     bytes: Snip{ offset: offset + snip.offset + snip.length, length: 0 },
                                     chars: Snip{ offset: char_offset + btoc[snip.offset + snip.length], length: 0 },
@@ -98,6 +129,7 @@ impl<'t> TextTokens<'t> {
                                 });
                             }
                         }
+                        new_b.pop(); // remove last sentence breaker 
                     },
                 }
                 new_b.push(ib.clone());
@@ -110,7 +142,6 @@ impl<'t> TextTokens<'t> {
                 //println!("{}",txt);
                 //println!("{:?} -> {}",snip,offset + snip.offset);
                 if text.buffer[offset + snip.offset .. offset + snip.offset + snip.length].trim().len() > 0 {
-                    cnt += 1;
                     let btoc = btoc(txt);  
                     new_b.push(InnerBound {
                         bytes: Snip{ offset: offset + snip.offset + snip.length, length: 0 },
@@ -120,10 +151,18 @@ impl<'t> TextTokens<'t> {
                     });
                 }
             }
-            if cnt > 0 {
-                bounds = BoundEnum::IntoIter(new_b.into_iter());
+            new_b.pop(); // remove last sentence breaker 
+            if new_b.len() > cnt {
+                bounds = Some(BoundEnum::IntoIter(new_b.into_iter()));
             }
         }
+        let bounds = match bounds {
+            Some(b) => b,
+            None => match breakers {
+                Cow::Owned(b) => BoundEnum::IntoIter(b.into_iter()),
+                Cow::Borrowed(b) => BoundEnum::Iter(b.iter()),
+            },
+        };
         TextTokens {
             text,
             bounds,

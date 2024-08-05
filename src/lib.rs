@@ -1,6 +1,7 @@
 use text_parsing::{
     Breaker, Local, Snip,
     SourceEvent, Source,
+    IntoSource,
 };
 
 mod emoji;
@@ -32,12 +33,37 @@ pub enum Error {
     TextParser(text_parsing::Error),
 }
 
+const EPS: f64 = 1e-10;
 
 #[derive(Debug,Clone,Copy,PartialEq,PartialOrd)]
 pub enum Number {
     Integer(i64),
     Float(f64),
 }
+impl Number {
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            Number::Integer(i) => *i as f64,
+            Number::Float(f) => *f,
+        }
+    }
+}
+impl Ord for Number {
+    fn cmp(&self,other: &Number) -> std::cmp::Ordering {
+        let s = self.as_f64();
+        let o = other.as_f64();
+        let d = s-o;
+        match d.abs() < EPS {
+            true => std::cmp::Ordering::Equal,
+            false => {
+                if d > 0.0 { return std::cmp::Ordering::Greater; }
+                if d < 0.0 { return std::cmp::Ordering::Less; }
+                std::cmp::Ordering::Equal
+            },
+        }
+    }
+}
+impl Eq for Number {}
 
 #[derive(Debug,Clone,Copy,Eq,PartialEq,Ord,PartialOrd)]
 pub enum Separator {
@@ -53,7 +79,7 @@ pub enum Formatter {
     Joiner, // u{200d}
 }
 
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Ord,PartialOrd)]
 pub enum Special {
     Punctuation(char),
     Symbol(char),
@@ -61,7 +87,7 @@ pub enum Special {
 }
 
 #[cfg(feature = "strings")]
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Word {
     Word(String),
     StrangeWord(String),
@@ -82,7 +108,7 @@ pub enum Numerical {
 }
 
 #[cfg(feature = "strings")]
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Struct {
     Hashtag(String),
     Mention(String),
@@ -90,7 +116,7 @@ pub enum Struct {
 }
 
 #[cfg(feature = "strings")]
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Unicode {
     String(String),
     Formatter(Formatter),
@@ -98,7 +124,7 @@ pub enum Unicode {
 
 
 #[cfg(not(feature = "strings"))]
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Word {
     Word,
     StrangeWord,       
@@ -108,7 +134,7 @@ pub enum Word {
 }
 
 #[cfg(not(feature = "strings"))]
-#[derive(Debug,Clone,Eq,PartialEq,Ord,PartialOrd)]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Numerical {
     //Date,
     //Ip,
@@ -119,7 +145,7 @@ pub enum Numerical {
 }
 
 #[cfg(not(feature = "strings"))]
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Struct {
     Hashtag,
     Mention, 
@@ -127,13 +153,15 @@ pub enum Struct {
 }
 
 #[cfg(not(feature = "strings"))]
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Unicode {
     String,
     Formatter(Formatter),
 }
 
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+
+#[cfg(feature = "strings")]
+#[derive(Debug,Clone,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Token {
     Word(Word),
     Struct(Struct),
@@ -141,6 +169,88 @@ pub enum Token {
     Unicode(Unicode),    
 }
 
+#[cfg(not(feature = "strings"))]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
+pub enum Token {
+    Word(Word),
+    Struct(Struct),
+    Special(Special),
+    Unicode(Unicode),    
+}
+
+/*pub trait IntoTokens<T> {
+    type IntoTokens: IntoTokenizer<IntoTokens = T>;
+}
+
+impl<'s> IntoTokenSource<Token2> for &'s str {
+    type IntoTokens = TextStr<'s>;
+    
+    fn (self) -> Result<TextStr<'s>,Error> {
+        TextStr::new(self)
+    }
+        
+}*/
+
+
+
+#[derive(Debug)]
+pub struct TextStr<'s> {
+    buffer: &'s str,
+    originals: Vec<Local<()>>,
+    breakers: Vec<InnerBound>,
+}
+impl<'s> TextStr<'s> {
+    pub fn new<'a>(s: &'a str) -> Result<TextStr<'a>,Error> {
+        let text = inner_new(s.into_source(),false)?;
+        Ok(TextStr{
+            buffer: s,
+            originals: text.originals,
+            breakers: text.breakers,
+        })            
+    }
+}
+
+fn inner_new<S: Source>(mut source: S, with_buffer: bool) -> Result<Text,Error> {
+    let mut text = Text {
+        buffer: String::new(),
+        originals: Vec::new(),
+        breakers: Vec::new(),
+    };
+    while let Some(local_se) = source.next_char().map_err(Error::TextParser)? {
+        let (local,se) = local_se.into_inner();
+        let c = match se {
+            SourceEvent::Char(c) => match c {
+                '\u{0060}' => '\u{0027}',
+                _ => c,
+            },
+            SourceEvent::Breaker(b) => {
+                let (c,opt_b) = match b {
+                    Breaker::None => continue ,
+                    Breaker::Space => (' ',None),                        
+                    Breaker::Line => ('\n',None),
+                    Breaker::Word => ('\u{200B}',Some(b)), // zero width space
+                    Breaker::Sentence |
+                    Breaker::Paragraph |
+                    Breaker::Section => ('\n',Some(b)),
+                };
+                if let Some(b) = opt_b {
+                    let br = InnerBound {
+                        bytes: Snip { offset: text.buffer.len(), length: c.len_utf8() },
+                        chars: Snip { offset: text.originals.len(), length: 1 },
+                        breaker: b,
+                        original: Some(local),
+                    };
+                    //println!("BR: {:?}",br);
+                    text.breakers.push(br);
+                }
+                c
+            },
+        };
+        if with_buffer { text.buffer.push(c); }
+        text.originals.push(local);
+    }        
+    Ok(text)
+}
 
 #[derive(Debug)]
 pub struct Text {
@@ -149,62 +259,36 @@ pub struct Text {
     breakers: Vec<InnerBound>,
 }
 impl Text {
-    pub fn new<S: Source>(mut source: S) -> Result<Text,Error> {
-        let mut text = Text {
-            buffer: String::new(),
-            originals: Vec::new(),
-            breakers: Vec::new(),
-        };
-        while let Some(local_se) = source.next_char().map_err(Error::TextParser)? {
-            let (local,se) = local_se.into_inner();
-            let c = match se {
-                SourceEvent::Char(c) => match c {
-                    '\u{0060}' => '\u{0027}',
-                    _ => c,
-                },
-                SourceEvent::Breaker(b) => {
-                    let (c,opt_b) = match b {
-                        Breaker::None => continue ,
-                        Breaker::Space => (' ',None),                        
-                        Breaker::Line => ('\n',None),
-                        Breaker::Word => ('\u{200B}',Some(b)), // zero width space
-                        Breaker::Sentence |
-                        Breaker::Paragraph |
-                        Breaker::Section => ('\n',Some(b)),
-                    };
-                    if let Some(b) = opt_b {
-                        let br = InnerBound {
-                            bytes: Snip { offset: text.buffer.len(), length: c.len_utf8() },
-                            chars: Snip { offset: text.originals.len(), length: 1 },
-                            breaker: b,
-                            original: Some(local),
-                        };
-                        //println!("BR: {:?}",br);
-                        text.breakers.push(br);
-                    }
-                    c
-                },
-            };
-            text.buffer.push(c);
-            text.originals.push(local);
-        }        
-        Ok(text)
+    pub fn new<S: Source>(source: S) -> Result<Text,Error> {
+        inner_new(source,true)
     }
     pub fn token_text<'s>(&'s self, token: &TextToken) -> &'s str {
         let Snip { offset: begin, length: len } = token.locality.bytes();
         let end = begin + len;
         &self.buffer[begin .. end]
     }
+    pub fn text(&self) -> &str {
+        &self.buffer
+    }
 }
 
-#[derive(Debug,Clone,Copy,PartialEq,PartialOrd)]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Bound {
     Sentence,
     Paragraph,
     Section,
 }
 
-#[derive(Debug,Clone,PartialEq)]
+#[cfg(feature = "strings")]
+#[derive(Debug,Clone,PartialEq,PartialOrd,Eq,Ord)]
+pub struct TextToken {
+    locality: Local<()>,
+    original: Option<Local<()>>,
+    pub token: Token2,
+}
+
+#[cfg(not(feature = "strings"))]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub struct TextToken {
     locality: Local<()>,
     original: Option<Local<()>>,
@@ -224,6 +308,15 @@ impl TextToken {
 }
 
 impl TextToken {
+    pub fn local(&self) -> Local<()> {
+        self.locality
+    }
+    pub fn original(&self) -> Option<Local<()>> {
+        self.original
+    }
+    pub fn try_as_token(&self) -> Result<Token,Bound> {
+        self.token.try_as_token()
+    }
     pub fn as_original_token(&self) -> Option<Local<&Token2>> {
         self.original.map(|original| original.local(&self.token))
     }
@@ -241,6 +334,22 @@ impl TextToken {
                 }
             },
             None => Err(OriginalError::NoOriginal),
+        }
+    }
+
+    pub fn test_token(lt: Local<Token2>) -> TextToken {
+        let (local,token) = lt.into_inner();
+        TextToken {
+            locality: local,
+            original: Some(local.local(())),
+            token,
+        }
+    }
+    pub fn test_new(token: Token2, local: Local<()>, original: Option<Local<()>>) -> TextToken {
+        TextToken {
+            locality: local,
+            original,
+            token,
         }
     }
 }
@@ -285,7 +394,20 @@ pub enum ExtToken {
     Bound(Bound),
 }*/
 
-#[derive(Debug,Clone,PartialEq,PartialOrd)]
+
+
+#[cfg(feature = "strings")]
+#[derive(Debug,Clone,PartialEq,PartialOrd,Eq,Ord)]
+pub enum Token2 {
+    Word(Word),
+    Struct(Struct),
+    Special(Special),
+    Unicode(Unicode),
+
+    Bound(Bound),
+}
+#[cfg(not(feature = "strings"))]
+#[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Token2 {
     Word(Word),
     Struct(Struct),
@@ -301,6 +423,27 @@ impl From<Token> for Token2 {
             Token::Struct(s) => Token2::Struct(s),
             Token::Special(s) => Token2::Special(s),
             Token::Unicode(u) => Token2::Unicode(u),
+        }
+    }
+}
+impl Token2 {
+    #[cfg(not(feature = "strings"))]
+    fn try_as_token(&self) -> Result<Token,Bound> {
+        (*self).try_into_token()
+    }
+
+    #[cfg(feature = "strings")]
+    fn try_as_token(&self) -> Result<Token,Bound> {
+        self.clone().try_into_token()
+    }
+    
+    fn try_into_token(self) -> Result<Token,Bound> {
+        match self {
+            Token2::Word(w) => Ok(Token::Word(w)),
+            Token2::Struct(s) => Ok(Token::Struct(s)),
+            Token2::Special(s) => Ok(Token::Special(s)),
+            Token2::Unicode(u) => Ok(Token::Unicode(u)),
+            Token2::Bound(b) => Err(b),
         }
     }
 }
