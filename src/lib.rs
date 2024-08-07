@@ -272,6 +272,24 @@ impl Text {
     }
 }
 
+impl TryFrom<String> for Text {
+    type Error = Error;
+    
+    fn try_from(s: String) -> Result<Text,Error> {
+        let mut text = inner_new((&s).into_source(),false)?;
+        text.buffer = s;
+        Ok(text)
+    }
+}
+
+impl TryFrom<&str> for Text {
+    type Error = Error;
+    
+    fn try_from(s: &str) -> Result<Text,Error> {
+        Text::new(s.into_source())
+    }
+}
+
 #[derive(Debug,Clone,Copy,PartialEq,PartialOrd,Eq,Ord)]
 pub enum Bound {
     Sentence,
