@@ -1,6 +1,6 @@
 [package]
 name = "text-tokenizer"
-version = "0.5.4"
+version = "0.5.5"
 authors = ["merl <merl.001.mia@gmail.com>"]
 edition = "2021"
 license = "MIT"

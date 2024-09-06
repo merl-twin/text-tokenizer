@@ -270,6 +270,9 @@ impl Text {
     pub fn text(&self) -> &str {
         &self.buffer
     }
+    pub fn original_locality(&self, idx: usize) -> Option<Local<()>> {
+        self.originals.get(idx).copied()
+    }
 }
 
 impl TryFrom<String> for Text {
