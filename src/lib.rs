@@ -273,6 +273,9 @@ impl Text {
     pub fn original_locality(&self, idx: usize) -> Option<Local<()>> {
         self.originals.get(idx).copied()
     }
+    pub fn originals(&self) -> &Vec<Local<()>> {
+        &self.originals
+    }
 }
 
 impl TryFrom<String> for Text {
