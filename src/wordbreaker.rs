@@ -54,7 +54,7 @@ impl<'t> ExtWordBounds<'t> {
             split_dot: if options.contains(&TokenizerOptions::SplitDot) { true } else { false },
             split_underscore: if options.contains(&TokenizerOptions::SplitUnderscore) { true } else { false },
             split_colon: if options.contains(&TokenizerOptions::SplitColon) { true } else { false },
-            merge_whites: if options.contains(&TokenizerOptions::MergeWhites) { true } else { false },
+            merge_whites: if options.contains(&TokenizerOptions::MergeWhites) { true } else { false },            
         }
     }
 }
@@ -128,6 +128,7 @@ pub(crate) struct WordBreaker<'t> {
     initial: &'t str,
     prev_is_separator: bool,
     merge_whites: bool,
+    merge_punct: bool,
     bounds: std::iter::Peekable<ExtWordBounds<'t>>,
 }
 impl<'t> WordBreaker<'t> {
@@ -136,6 +137,7 @@ impl<'t> WordBreaker<'t> {
             initial: s,
             prev_is_separator: true,
             merge_whites: if options.contains(&TokenizerOptions::MergeWhites) { true } else { false },
+            merge_punct: if options.contains(&TokenizerOptions::NoMergePunctuation) { false } else { true },
             bounds: ExtWordBounds::new(s,options).peekable(),
         }
     }
@@ -166,23 +168,29 @@ impl<'t> WordBreaker<'t> {
                         }                                          
                     }
                     if c.is_ascii_punctuation() ||
-                        (c.is_whitespace() && self.merge_whites) ||
+                       c.is_whitespace() ||
                         (c.general_category_group() == GeneralCategoryGroup::Punctuation) ||                        
                         (c.general_category() == GeneralCategory::Format)
                     {
                         let mut local = local;
-                        loop {
-                            match self.bounds.peek() {
-                                Some(p) if *p.data() == w => {
-                                    let (loc2,_) = p.into_inner();
-                                    match Local::from_segment(local,loc2) {
-                                        Ok(new_loc) => local = new_loc,
-                                        Err(_) => break,
-                                    }
-                                },
-                                _ => break,
+                        if (c.is_whitespace() && self.merge_whites) ||
+                            (c.is_ascii_punctuation() && self.merge_punct ) ||
+                            ((c.general_category_group() == GeneralCategoryGroup::Punctuation) && self.merge_punct) ||                        
+                            (c.general_category() == GeneralCategory::Format)
+                        {
+                            loop {
+                                match self.bounds.peek() {
+                                    Some(p) if *p.data() == w => {
+                                        let (loc2,_) = p.into_inner();
+                                        match Local::from_segment(local,loc2) {
+                                            Ok(new_loc) => local = new_loc,
+                                            Err(_) => break,
+                                        }
+                                    },
+                                    _ => break,
+                                }
+                                self.bounds.next();
                             }
-                            self.bounds.next();
                         }
                         
                         if c.is_ascii_punctuation() || (c.general_category_group() == GeneralCategoryGroup::Punctuation) {

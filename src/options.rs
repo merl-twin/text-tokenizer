@@ -1,25 +1,21 @@
-
-use crate::{
-    SentenceBreaker,
-    UnicodeSentenceBreaker,
-};
+use crate::{SentenceBreaker, UnicodeSentenceBreaker};
 
 use std::collections::BTreeSet;
-
 
 pub trait IntoTokenizer: Sized {
     type IntoTokens;
     fn into_tokenizer<S: SentenceBreaker>(self, params: TokenizerParams<S>) -> Self::IntoTokens;
 }
 
-#[derive(Debug,Copy,Clone,PartialEq,Eq,PartialOrd,Ord)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TokenizerOptions {
     NoComplexTokens,
     StructTokens,
     SplitDot,
     SplitUnderscore,
     SplitColon,
-    
+
+    NoMergePunctuation,
     MergeWhites,
     WithSentences,
 }
@@ -64,14 +60,14 @@ impl<S: SentenceBreaker> TokenizerParams<S> {
         self.options.insert(TokenizerOptions::WithSentences);
         TokenizerParams {
             options: self.options,
-            sentence_breaker: UnicodeSentenceBreaker,            
+            sentence_breaker: UnicodeSentenceBreaker,
         }
     }
     pub fn with_sentence_breaker<U: SentenceBreaker>(mut self, sb: U) -> TokenizerParams<U> {
         self.options.insert(TokenizerOptions::WithSentences);
         TokenizerParams {
             options: self.options,
-            sentence_breaker: sb,            
+            sentence_breaker: sb,
         }
     }
 }
