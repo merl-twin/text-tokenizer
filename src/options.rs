@@ -15,7 +15,7 @@ pub enum TokenizerOptions {
     SplitUnderscore,
     SplitColon,
 
-    NoMergePunctuation,
+    MergePunctuation,
     MergeWhites,
     WithSentences,
 }
@@ -39,16 +39,19 @@ impl TokenizerParams<()> {
             .add_option(TokenizerOptions::SplitUnderscore)
             .add_option(TokenizerOptions::SplitColon)
             .add_option(TokenizerOptions::MergeWhites)
+            .add_option(TokenizerOptions::MergePunctuation)
     }
     pub fn basic() -> TokenizerParams<()> {
         TokenizerParams::default()
             .add_option(TokenizerOptions::NoComplexTokens)
             .add_option(TokenizerOptions::MergeWhites)
+            .add_option(TokenizerOptions::MergePunctuation)
     }
     pub fn complex() -> TokenizerParams<()> {
         TokenizerParams::default()
             .add_option(TokenizerOptions::StructTokens)
             .add_option(TokenizerOptions::MergeWhites)
+            .add_option(TokenizerOptions::MergePunctuation)
     }
 }
 impl<S: SentenceBreaker> TokenizerParams<S> {

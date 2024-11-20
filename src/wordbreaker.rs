@@ -38,7 +38,6 @@ struct ExtWordBounds<'t> {
     split_dot: bool,
     split_underscore: bool,
     split_colon: bool,
-    merge_whites: bool,
 }
 impl<'t> ExtWordBounds<'t> {
     fn new<'a>(s: &'a str, options: &BTreeSet<TokenizerOptions>) -> ExtWordBounds<'a> {
@@ -54,7 +53,6 @@ impl<'t> ExtWordBounds<'t> {
             split_dot: if options.contains(&TokenizerOptions::SplitDot) { true } else { false },
             split_underscore: if options.contains(&TokenizerOptions::SplitUnderscore) { true } else { false },
             split_colon: if options.contains(&TokenizerOptions::SplitColon) { true } else { false },
-            merge_whites: if options.contains(&TokenizerOptions::MergeWhites) { true } else { false },            
         }
     }
 }
@@ -69,13 +67,25 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                 let mut char_len = 0;
                 let mut chs = w.chars().peekable();
                 let num = match f64::from_str(w) { Ok(_) => true, Err(_) => false };
+                let mut first = true;
+                let mut split = false;
                 while let Some(c) = chs.next() {
                     let ln = c.len_utf8();
                     let c_is_whitespace = c.is_whitespace();
                     let c_is_spliter = self.ext_spliters.contains(&c);
-                    let c_is_punctuation = c.general_category_group() == GeneralCategoryGroup::Punctuation;                    
+                    let c_is_punctuation = c.general_category_group() == GeneralCategoryGroup::Punctuation;
+                    if first && (c_is_whitespace || c_is_punctuation) && chs.peek().is_some() {
+                        let mut same = true;
+                        for c2 in w.chars() {
+                            same = same && (c2 == c);
+                            if !same { break; }
+                        }
+                        split = same;
+                        first = false;
+                    };
                     if  c_is_spliter //( c_is_other_format && !exceptions_contain_c )
-                        || ( c_is_whitespace && !self.merge_whites )
+                        || split
+                        //|| ( c_is_whitespace && !self.merge_whites )
                         || ( (c == '\u{200d}') && chs.peek().is_none() ) 
                         || ( c_is_punctuation && !num && !self.allow_complex ) // && !exceptions_contain_c 
                         || ( (c == '.') && !num && self.split_dot )
@@ -137,7 +147,7 @@ impl<'t> WordBreaker<'t> {
             initial: s,
             prev_is_separator: true,
             merge_whites: if options.contains(&TokenizerOptions::MergeWhites) { true } else { false },
-            merge_punct: if options.contains(&TokenizerOptions::NoMergePunctuation) { false } else { true },
+            merge_punct: if options.contains(&TokenizerOptions::MergePunctuation) { true } else { false },
             bounds: ExtWordBounds::new(s,options).peekable(),
         }
     }
