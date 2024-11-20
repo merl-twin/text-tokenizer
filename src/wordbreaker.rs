@@ -139,6 +139,7 @@ pub(crate) struct WordBreaker<'t> {
     prev_is_separator: bool,
     merge_whites: bool,
     merge_punct: bool,
+    split_number_sign: bool,
     bounds: std::iter::Peekable<ExtWordBounds<'t>>,
 }
 impl<'t> WordBreaker<'t> {
@@ -148,15 +149,16 @@ impl<'t> WordBreaker<'t> {
             prev_is_separator: true,
             merge_whites: if options.contains(&TokenizerOptions::MergeWhites) { true } else { false },
             merge_punct: if options.contains(&TokenizerOptions::MergePunctuation) { true } else { false },
+            split_number_sign: if options.contains(&TokenizerOptions::SplitNumberSign) { true } else { false },
             bounds: ExtWordBounds::new(s,options).peekable(),
         }
     }
     fn next_token(&mut self) -> Option<Local<BasicToken<'t>>> {
         match self.bounds.next() {
-            Some(w) => {
+            Some(w) => {                
                 let (local,w) = w.into_inner();
                 if let Some(c) = one_char_word(w) {
-                    if ((c == '+')||(c == '-')) && self.prev_is_separator {
+                    if ((c == '+')||(c == '-')) && self.prev_is_separator && !self.split_number_sign {
                         if let Some(w2) = self.bounds.peek() {
                             let (loc2,w2) = w2.into_inner();
                             let mut num = true;  

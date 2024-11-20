@@ -14,7 +14,7 @@ pub enum TokenizerOptions {
     SplitDot,
     SplitUnderscore,
     SplitColon,
-
+    SplitNumberSign,
     MergePunctuation,
     MergeWhites,
     WithSentences,
