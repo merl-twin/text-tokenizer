@@ -335,6 +335,11 @@ impl TextToken {
     pub fn original(&self) -> Option<Local<()>> {
         self.original
     }
+    pub fn into_position(mut self) -> TextToken {
+        self.locality = self.locality.into_position();
+        self.original = self.original.map(|or| or.into_position());
+        self
+    }
     pub fn try_as_token(&self) -> Result<Token, Bound> {
         self.token.try_as_token()
     }
