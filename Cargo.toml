@@ -1,8 +1,8 @@
 [package]
 name = "text-tokenizer"
-version = "0.5.10"
+version = "0.5.11"
 authors = ["merl <merl.001.mia@gmail.com>"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 readme = "README.md"
 description = "Custom text tokenizer"
