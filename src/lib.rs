@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use text_parsing::{Breaker, IntoSource, Local, Snip, Source, SourceEvent};
 
 mod emoji;
@@ -201,11 +202,10 @@ impl<'s> TextStr<'s> {
 }
 
 fn inner_new<S: Source>(mut source: S, with_buffer: bool) -> Result<Text, Error> {
-    let mut text = Text {
-        buffer: String::new(),
-        originals: Vec::new(),
-        breakers: Vec::new(),
-    };
+    let mut buffer = String::new();
+    let mut originals = Vec::new();
+    let mut breakers = Vec::new();
+
     while let Some(local_se) = source.next_char().map_err(Error::TextParser)? {
         let (local, se) = local_se.into_inner();
         let c = match se {
@@ -224,33 +224,37 @@ fn inner_new<S: Source>(mut source: S, with_buffer: bool) -> Result<Text, Error>
                 if let Some(b) = opt_b {
                     let br = InnerBound {
                         bytes: Snip {
-                            offset: text.buffer.len(),
+                            offset: buffer.len(),
                             length: c.len_utf8(),
                         },
                         chars: Snip {
-                            offset: text.originals.len(),
+                            offset: originals.len(),
                             length: 1,
                         },
                         breaker: b,
                         original: Some(local),
                     };
                     //println!("BR: {:?}",br);
-                    text.breakers.push(br);
+                    breakers.push(br);
                 }
                 c
             }
         };
         if with_buffer {
-            text.buffer.push(c);
+            buffer.push(c);
         }
-        text.originals.push(local);
+        originals.push(local);
     }
-    Ok(text)
+    Ok(Text {
+        buffer: Arc::new(buffer),
+        originals,
+        breakers,
+    })
 }
 
 #[derive(Debug)]
 pub struct Text {
-    buffer: String,
+    buffer: Arc<String>,
     originals: Vec<Local<()>>,
     breakers: Vec<InnerBound>,
 }
@@ -267,13 +271,16 @@ impl Text {
         &self.buffer[begin..end]
     }
     pub fn text(&self) -> &str {
-        &self.buffer
+        self.buffer.as_ref()
     }
     pub fn original_locality(&self, idx: usize) -> Option<Local<()>> {
         self.originals.get(idx).copied()
     }
     pub fn originals(&self) -> &Vec<Local<()>> {
         &self.originals
+    }
+    pub fn shared_text(&self) -> Arc<String> {
+        self.buffer.clone()
     }
 }
 
@@ -282,7 +289,7 @@ impl TryFrom<String> for Text {
 
     fn try_from(s: String) -> Result<Text, Error> {
         let mut text = inner_new((&s).into_source(), false)?;
-        text.buffer = s;
+        text.buffer = Arc::new(s);
         Ok(text)
     }
 }
