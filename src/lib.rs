@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use text_parsing::{Breaker, IntoSource, Local, Snip, Source, SourceEvent};
+use text_parsing::{Breaker, IntoSource, Local, Localize, Snip, Source, SourceEvent};
 
 mod emoji;
 pub use emoji::EMOJIMAP;
@@ -187,15 +187,15 @@ impl<'s> IntoTokenSource<Token2> for &'s str {
 #[derive(Debug)]
 pub struct TextStr<'s> {
     buffer: &'s str,
-    originals: Vec<Local<()>>,
-    breakers: Vec<InnerBound>,
+    localities: Arc<Vec<TextLocality>>,
+    breakers: Arc<Vec<InnerBound>>,
 }
 impl<'s> TextStr<'s> {
     pub fn new<'a>(s: &'a str) -> Result<TextStr<'a>, Error> {
         let text = inner_new(s.into_source(), false)?;
         Ok(TextStr {
             buffer: s,
-            originals: text.originals,
+            localities: text.localities,
             breakers: text.breakers,
         })
     }
@@ -203,8 +203,9 @@ impl<'s> TextStr<'s> {
 
 fn inner_new<S: Source>(mut source: S, with_buffer: bool) -> Result<Text, Error> {
     let mut buffer = String::new();
-    let mut originals = Vec::new();
+    let mut localities = Vec::new();
     let mut breakers = Vec::new();
+    let mut buffer_len = 0;
 
     while let Some(local_se) = source.next_char().map_err(Error::TextParser)? {
         let (local, se) = local_se.into_inner();
@@ -224,11 +225,11 @@ fn inner_new<S: Source>(mut source: S, with_buffer: bool) -> Result<Text, Error>
                 if let Some(b) = opt_b {
                     let br = InnerBound {
                         bytes: Snip {
-                            offset: buffer.len(),
+                            offset: buffer_len,
                             length: c.len_utf8(),
                         },
                         chars: Snip {
-                            offset: originals.len(),
+                            offset: localities.len(),
                             length: 1,
                         },
                         breaker: b,
@@ -240,23 +241,44 @@ fn inner_new<S: Source>(mut source: S, with_buffer: bool) -> Result<Text, Error>
                 c
             }
         };
+
+        let buf_local = ().localize(
+            Snip {
+                offset: buffer_len,
+                length: c.len_utf8(),
+            },
+            Snip {
+                offset: localities.len(),
+                length: 1,
+            },
+        );
         if with_buffer {
             buffer.push(c);
         }
-        originals.push(local);
+        buffer_len += c.len_utf8();
+        localities.push(TextLocality {
+            buffer: buf_local,
+            original: local,
+        });
     }
     Ok(Text {
         buffer: Arc::new(buffer),
-        originals,
-        breakers,
+        localities: Arc::new(localities),
+        breakers: Arc::new(breakers),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+pub struct TextLocality {
+    pub buffer: Local<()>,
+    pub original: Local<()>,
 }
 
 #[derive(Debug)]
 pub struct Text {
     buffer: Arc<String>,
-    originals: Vec<Local<()>>,
-    breakers: Vec<InnerBound>,
+    localities: Arc<Vec<TextLocality>>,
+    breakers: Arc<Vec<InnerBound>>,
 }
 impl Text {
     pub fn new<S: Source>(source: S) -> Result<Text, Error> {
@@ -274,13 +296,17 @@ impl Text {
         self.buffer.as_ref()
     }
     pub fn original_locality(&self, idx: usize) -> Option<Local<()>> {
-        self.originals.get(idx).copied()
+        self.localities.get(idx).map(|tl| tl.original)
     }
-    pub fn originals(&self) -> &Vec<Local<()>> {
-        &self.originals
+    pub fn localities(&self) -> &Vec<TextLocality> {
+        self.localities.as_ref()
     }
-    pub fn shared_text(&self) -> Arc<String> {
-        self.buffer.clone()
+    pub fn shared_text(&self) -> Text {
+        Text {
+            buffer: self.buffer.clone(),
+            localities: self.localities.clone(),
+            breakers: self.breakers.clone(),
+        }
     }
 }
 
