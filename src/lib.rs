@@ -24,18 +24,31 @@ pub enum Error {
     TextParser(text_parsing::Error),
 }
 
-const EPS: f64 = 1e-10;
+const EPS: f64 = 1e-8;
 
+#[cfg(feature = "strings")]
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum Number {
     Integer(i64),
     Float(f64),
+    // String is an integer, but with the leading zeroes, for example: "007"
+    ZeroInteger { i: i64, s: String },
 }
+
+#[cfg(not(feature = "strings"))]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub enum Number {
+    Integer(i64),
+    Float(f64),
+    ZeroInteger { i: i64 },
+}
+
 impl Number {
     pub fn as_f64(&self) -> f64 {
         match self {
             Number::Integer(i) => *i as f64,
             Number::Float(f) => *f,
+            Number::ZeroInteger { i, .. } => *i as f64,
         }
     }
 }

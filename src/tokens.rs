@@ -82,7 +82,22 @@ impl<'t> Tokens<'t> {
     }
     fn basic_number_to_pt(&mut self, s: &str) -> Token {
         Token::Word(match i64::from_str(s) {
-            Ok(n) => Word::Number(Number::Integer(n)),
+            Ok(n) => match s.chars().next() {
+                Some('0') => {
+                    #[cfg(not(feature = "strings"))]
+                    {
+                        Word::Number(Number::ZeroInteger { i: n })
+                    }
+                    #[cfg(feature = "strings")]
+                    {
+                        Word::Number(Number::ZeroInteger {
+                            i: n,
+                            s: s.to_string(),
+                        })
+                    }
+                }
+                Some(_) | None => Word::Number(Number::Integer(n)),
+            },
             Err(_) => match f64::from_str(s) {
                 Ok(n) => Word::Number(Number::Float(n)),
                 Err(..) => {
