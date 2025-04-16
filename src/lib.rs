@@ -257,12 +257,14 @@ fn inner_new<S: Source>(mut source: S, with_buffer: bool) -> Result<Text, Error>
 
         let buf_local = ().localize(
             Snip {
-                offset: buffer_len,
-                length: c.len_utf8(),
-            },
-            Snip {
+                // chars
                 offset: localities.len(),
                 length: 1,
+            },
+            Snip {
+                // bytes
+                offset: buffer_len,
+                length: c.len_utf8(),
             },
         );
         if with_buffer {
