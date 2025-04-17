@@ -171,7 +171,10 @@ impl<'t> Tokens<'t> {
                 None => match one_char_word(&rs) {
                     //Some(c) if c.general_category() == GeneralCategory::ModifierSymbol => Token::UnicodeModifier(c),
                     Some(c) if c.general_category_group() == GeneralCategoryGroup::Symbol => {
-                        Token::Special(Special::Symbol(c))
+                        match c.general_category() {
+                            GeneralCategory::CurrencySymbol => Token::Special(Special::Currency(c)),
+                            _ => Token::Special(Special::Symbol(c)),
+                        }
                     }
                     Some(_) | None => match has_word_parts {
                         true => {

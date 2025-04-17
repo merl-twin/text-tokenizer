@@ -89,6 +89,7 @@ pub enum Formatter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
 pub enum Special {
+    Currency(char),
     Punctuation(char),
     Symbol(char),
     Separator(Separator),
@@ -531,6 +532,38 @@ impl Token2 {
             Token2::Unicode(u) => Some(Token::Unicode(u)),
             Token2::Bound(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(feature = "strings"))]
+mod test {
+    use super::*;
+    use text_parsing::{
+        entities, tagger, IntoPipeParser, IntoSource, Localize, ParserExt, SourceExt,
+    };
+
+    fn check_results(result: &Vec<Local<Token>>, lib_res: &Vec<Local<Token>>, _uws: &str) {
+        assert_eq!(result.len(), lib_res.len());
+        for i in 0..result.len() {
+            let res: Local<Token> = result[i].clone().into();
+            assert_eq!(res, lib_res[i]);
+        }
+    }
+
+    //#[test]
+    fn symbols() {
+        let uws = "Сибирь Арене 17 30 от 2560₽ 😀";
+        //let result = Vec::new();
+
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //check_results(&result, &lib_res, uws);
+        for t in lib_res {
+            println!("{:?}", t);
+        }
+        panic!()
     }
 }
 
