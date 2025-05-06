@@ -1,11 +1,5 @@
-use text_parsing::{
-    Snip,
-};
-use unicode_segmentation::{
-    UnicodeSegmentation,
-    USentenceBoundIndices,
-};
-
+use text_parsing::Snip;
+use unicode_segmentation::{USentenceBoundIndices, UnicodeSegmentation};
 
 pub trait SentenceBreaker {
     type Iter<'t>: Iterator<Item = Snip>;
@@ -24,7 +18,7 @@ pub struct UnicodeSentenceBreaker;
 
 impl SentenceBreaker for UnicodeSentenceBreaker {
     type Iter<'t> = UnicodeIter<'t>;
-    
+
     fn break_text<'t>(&self, text: &'t str) -> Self::Iter<'t> {
         UnicodeIter {
             iter: text.split_sentence_bound_indices(),
@@ -38,6 +32,9 @@ pub struct UnicodeIter<'t> {
 impl<'t> Iterator for UnicodeIter<'t> {
     type Item = Snip;
     fn next(&mut self) -> Option<Snip> {
-        self.iter.next().map(|(offset,s)| Snip{ offset, length: s.len() } )
+        self.iter.next().map(|(offset, s)| Snip {
+            offset,
+            length: s.len(),
+        })
     }
 }

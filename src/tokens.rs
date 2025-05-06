@@ -5,9 +5,9 @@ use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCa
 use text_parsing::Local;
 
 use crate::{
-    wordbreaker::{one_char_word, BasicToken, WordBreaker},
-    Formatter, IntoTokenizer, Number, Numerical, SentenceBreaker, Separator, Special, Struct,
-    Token, TokenizerOptions, TokenizerParams, Unicode, Word, EMOJIMAP,
+    EMOJIMAP, Formatter, IntoTokenizer, Number, Numerical, SentenceBreaker, Separator, Special,
+    Struct, Token, TokenizerOptions, TokenizerParams, Unicode, Word,
+    wordbreaker::{BasicToken, WordBreaker, one_char_word},
 };
 
 impl<'t> IntoTokenizer for &'t str {
@@ -370,20 +370,53 @@ impl<'t> Tokens<'t> {
             return None;
         }
 
-        let (loc1, s1) = self.buffer[0].into_inner();
-        let (loc2, s2) = self.buffer[1].into_inner();
-        match (s1, s2) {
-            (BasicToken::Punctuation('#'), BasicToken::Alphanumeric(_s))
-            | (BasicToken::Punctuation('#'), BasicToken::Number(_s)) => {
-                match Local::from_segment(loc1, loc2) {
-                    Ok(local) => {
-                        self.buffer.pop_front();
-                        self.buffer.pop_front();
-
-                        Some(local.local(Token::Struct({
+        let (mut loc, bt) = self.buffer[0].into_inner();
+        let mut ln = 1;
+        let mut buf = String::new();
+        match bt {
+            BasicToken::Punctuation('#') => {
+                while ln < self.buffer.len() {
+                    let (nloc, nbt) = self.buffer[ln].into_inner();
+                    match nbt {
+                        BasicToken::Punctuation('_') => match Local::from_segment(loc, nloc) {
+                            Ok(lc) => {
+                                #[cfg(feature = "strings")]
+                                {
+                                    buf.push('_');
+                                }
+                                loc = lc;
+                                ln += 1;
+                            }
+                            Err(_) => break,
+                        },
+                        BasicToken::Alphanumeric(_s) | BasicToken::Number(_s) => {
+                            match Local::from_segment(loc, nloc) {
+                                Ok(lc) => {
+                                    #[cfg(feature = "strings")]
+                                    {
+                                        buf += _s;
+                                    }
+                                    loc = lc;
+                                    ln += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        BasicToken::Punctuation(..)
+                        | BasicToken::Separator(..)
+                        | BasicToken::Formatter(..)
+                        | BasicToken::Mixed(..) => break,
+                    }
+                }
+                match ln > 1 {
+                    true => {
+                        for _ in 0..ln {
+                            self.buffer.pop_front();
+                        }
+                        Some(loc.local(Token::Struct({
                             #[cfg(feature = "strings")]
                             {
-                                Struct::Hashtag(_s.to_string())
+                                Struct::Hashtag(buf)
                             }
                             #[cfg(not(feature = "strings"))]
                             {
@@ -391,7 +424,7 @@ impl<'t> Tokens<'t> {
                             }
                         })))
                     }
-                    Err(_) => None,
+                    false => None,
                 }
             }
             _ => None,
@@ -402,20 +435,53 @@ impl<'t> Tokens<'t> {
             return None;
         }
 
-        let (loc1, s1) = self.buffer[0].into_inner();
-        let (loc2, s2) = self.buffer[1].into_inner();
-        match (s1, s2) {
-            (BasicToken::Punctuation('@'), BasicToken::Alphanumeric(_s))
-            | (BasicToken::Punctuation('@'), BasicToken::Number(_s)) => {
-                match Local::from_segment(loc1, loc2) {
-                    Ok(local) => {
-                        self.buffer.pop_front();
-                        self.buffer.pop_front();
-
-                        Some(local.local(Token::Struct({
+        let (mut loc, bt) = self.buffer[0].into_inner();
+        let mut ln = 1;
+        let mut buf = String::new();
+        match bt {
+            BasicToken::Punctuation('@') => {
+                while ln < self.buffer.len() {
+                    let (nloc, nbt) = self.buffer[ln].into_inner();
+                    match nbt {
+                        BasicToken::Punctuation('_') => match Local::from_segment(loc, nloc) {
+                            Ok(lc) => {
+                                #[cfg(feature = "strings")]
+                                {
+                                    buf.push('_');
+                                }
+                                loc = lc;
+                                ln += 1;
+                            }
+                            Err(_) => break,
+                        },
+                        BasicToken::Alphanumeric(_s) | BasicToken::Number(_s) => {
+                            match Local::from_segment(loc, nloc) {
+                                Ok(lc) => {
+                                    #[cfg(feature = "strings")]
+                                    {
+                                        buf += _s;
+                                    }
+                                    loc = lc;
+                                    ln += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        BasicToken::Punctuation(..)
+                        | BasicToken::Separator(..)
+                        | BasicToken::Formatter(..)
+                        | BasicToken::Mixed(..) => break,
+                    }
+                }
+                match ln > 1 {
+                    true => {
+                        for _ in 0..ln {
+                            self.buffer.pop_front();
+                        }
+                        Some(loc.local(Token::Struct({
                             #[cfg(feature = "strings")]
                             {
-                                Struct::Mention(_s.to_string())
+                                Struct::Mention(buf)
                             }
                             #[cfg(not(feature = "strings"))]
                             {
@@ -423,7 +489,7 @@ impl<'t> Tokens<'t> {
                             }
                         })))
                     }
-                    Err(_) => None,
+                    false => None,
                 }
             }
             _ => None,
