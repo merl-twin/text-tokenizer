@@ -14,6 +14,8 @@ pub enum TokenizerOptions {
     SplitDot,
     SplitUnderscore,
     SplitColon,
+    SplitComa,
+    SplitSemiColon,
     SplitNumberSign,
     MergePunctuation,
     MergeWhites,
@@ -38,6 +40,8 @@ impl TokenizerParams<()> {
             .add_option(TokenizerOptions::SplitDot)
             .add_option(TokenizerOptions::SplitUnderscore)
             .add_option(TokenizerOptions::SplitColon)
+            .add_option(TokenizerOptions::SplitComa)
+            .add_option(TokenizerOptions::SplitSemiColon)
             .add_option(TokenizerOptions::MergeWhites)
             .add_option(TokenizerOptions::MergePunctuation)
     }

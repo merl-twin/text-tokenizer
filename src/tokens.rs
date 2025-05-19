@@ -325,46 +325,50 @@ impl<'t> Tokens<'t> {
         Token::Special(Special::Punctuation(c))
     }
     /*fn check_url(&mut self) -> Option<PositionalToken> {
-        if !self.allow_structs { return None; }
-        let check = if self.buffer.len()>3 {
-            match (&self.buffer[0],&self.buffer[1],&self.buffer[2]) {
-                (BasicToken::Alphanumeric("http"),BasicToken::Punctuation(":"),BasicToken::Punctuation("//")) |
-                (BasicToken::Alphanumeric("https"),BasicToken::Punctuation(":"),BasicToken::Punctuation("//")) => true,
-                _ => false,
-            }
-        } else { false };
-        if check {
-            let mut url = "".to_string();
-            let tag_bound = None;
-            loop {
-                if let Some(b) = tag_bound {
-                    if (self.offset + url.len()) >= b { break; }
+            if !self.allow_structs { return None; }
+            let check = if self.buffer.len()>3 {
+                match (&self.buffer[0],&self.buffer[1],&self.buffer[2]) {
+                    (BasicToken::Alphanumeric("http"),BasicToken::Punctuation(":"),BasicToken::Punctuation("//")) |
+                    (BasicToken::Alphanumeric("https"),BasicToken::Punctuation(":"),BasicToken::Punctuation("//")) => true,
+                    _ => false,
                 }
-                match self.buffer.pop_front() {
-                    None => break,
-                    Some(BasicToken::Separator(s)) => {
-                        self.buffer.push_front(BasicToken::Separator(s));
-                        break;
-                    },
-                    Some(BasicToken::Alphanumeric(s)) |
-                    Some(BasicToken::Number(s)) |
-                    Some(BasicToken::Punctuation(s)) |
-                    Some(BasicToken::Formatter(s)) |
-                    Some(BasicToken::Mixed(s)) => {
-                        url += s;
-                    },
+            } else { false };
+            if check {
+                let mut url = "".to_string();
+                let tag_bound = None;
+                loop {
+                    if let Some(b) = tag_bound {
+                        if (self.offset + url.len()) >= b { break; }
+                    }
+                    match self.buffer.pop_front() {
+                        None => break,
+                        Some(BasicToken::Separator(s)) => {
+                            self.buffer.push_front(BasicToken::Separator(s));
+                            break;
+                        },
+                        Some(BasicToken::Alphanumeric(s)) |
+                        Some(BasicToken::Number(s)) |
+                        Some(BasicToken::Punctuation(s)) |
+                        Some(BasicToken::Formatter(s)) |
+                        Some(BasicToken::Mixed(s)) => {
+                            url += s;
+                        },
+                    }
                 }
-            }
-            let len = url.len();
-            let tok = PositionalToken {
-                offset: self.offset,
-                length: len,
-                token: Token::Url(url),
-            };
-            self.offset += len;
-            Some(tok)
-        } else { None }
+                let len = url.len();
+                let tok = PositionalToken {
+                    offset: self.offset,
+                    length: len,
+                    token: Token::Url(url),
+                };
+                self.offset += len;
+                Some(tok)
+            } else { None }
     }*/
+
+    // allowed because of feature "strings"
+    #[allow(unused_mut)]
+    #[allow(unused_variables)]
     fn check_hashtag(&mut self) -> Option<Local<Token>> {
         if !self.allow_structs || (self.buffer.len() < 2) {
             return None;
@@ -430,6 +434,10 @@ impl<'t> Tokens<'t> {
             _ => None,
         }
     }
+
+    // allowed because of feature "strings"
+    #[allow(unused_mut)]
+    #[allow(unused_variables)]
     fn check_mention(&mut self) -> Option<Local<Token>> {
         if !self.allow_structs || (self.buffer.len() < 2) {
             return None;

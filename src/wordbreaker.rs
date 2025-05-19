@@ -29,6 +29,9 @@ struct ExtWordBounds<'t> {
     split_dot: bool,
     split_underscore: bool,
     split_colon: bool,
+
+    split_semicolon: bool,
+    split_coma: bool,
 }
 impl<'t> ExtWordBounds<'t> {
     fn new<'a>(s: &'a str, options: &BTreeSet<TokenizerOptions>) -> ExtWordBounds<'a> {
@@ -40,26 +43,13 @@ impl<'t> ExtWordBounds<'t> {
             buffer: VecDeque::new(),
             //exceptions: ['\u{200d}'].iter().cloned().collect(),
             ext_spliters: ['\u{200c}'].iter().cloned().collect(),
-            allow_complex: if options.contains(&TokenizerOptions::NoComplexTokens) {
-                false
-            } else {
-                true
-            },
-            split_dot: if options.contains(&TokenizerOptions::SplitDot) {
-                true
-            } else {
-                false
-            },
-            split_underscore: if options.contains(&TokenizerOptions::SplitUnderscore) {
-                true
-            } else {
-                false
-            },
-            split_colon: if options.contains(&TokenizerOptions::SplitColon) {
-                true
-            } else {
-                false
-            },
+            allow_complex: !options.contains(&TokenizerOptions::NoComplexTokens),
+            split_dot: options.contains(&TokenizerOptions::SplitDot),
+            split_underscore: options.contains(&TokenizerOptions::SplitUnderscore),
+            split_colon: options.contains(&TokenizerOptions::SplitColon),
+
+            split_coma: options.contains(&TokenizerOptions::SplitComa),
+            split_semicolon: options.contains(&TokenizerOptions::SplitSemiColon),
         }
     }
 }
@@ -105,8 +95,10 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                         || ( (c == '\u{200d}') && chs.peek().is_none() )
                         || ( c_is_punctuation && !num && !self.allow_complex ) // && !exceptions_contain_c 
                         || ( (c == '.') && !num && self.split_dot )
+                        || ( (c == ',') && !num && self.split_coma )
                         || ( (c == '_') && !num && self.split_underscore )
                         || ( (c == ':') && self.split_colon )
+                        || ( (c == ';') && self.split_semicolon )
                     {
                         if len > 0 {
                             let local = ().localize(
