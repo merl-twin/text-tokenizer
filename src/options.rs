@@ -40,6 +40,15 @@ impl TokenizerParams<()> {
             .add_option(TokenizerOptions::SplitDot)
             .add_option(TokenizerOptions::SplitUnderscore)
             .add_option(TokenizerOptions::SplitColon)
+            .add_option(TokenizerOptions::SplitSemiColon)
+            .add_option(TokenizerOptions::MergeWhites)
+            .add_option(TokenizerOptions::MergePunctuation)
+    }
+    pub fn v1_1() -> TokenizerParams<()> {
+        TokenizerParams::default()
+            .add_option(TokenizerOptions::SplitDot)
+            .add_option(TokenizerOptions::SplitUnderscore)
+            .add_option(TokenizerOptions::SplitColon)
             .add_option(TokenizerOptions::SplitComa)
             .add_option(TokenizerOptions::SplitSemiColon)
             .add_option(TokenizerOptions::MergeWhites)
