@@ -628,18 +628,13 @@ mod test {
         IntoPipeParser, IntoSource, Localize, ParserExt, SourceExt, entities, tagger,
     };
 
-    /*
-    #[allow(dead_code)]
+    /*#[allow(dead_code)]
     fn print_pt(tok: &PositionalToken) -> String {
-        let mut r = match &tok.token {
-            Token::BBCode{ left, right } => {
-                let left = print_pts(left);
-                let right = print_pts(right);
-                format!("PositionalToken {{ offset: {}, length: {}, token: Token::BBCode {{ left: vec![\n{}], right: vec![\n{}] }} }},",tok.offset,tok.length,left,right)
-            },
-            _ => format!("PositionalToken {{ offset: {}, length: {}, token: Token::{:?} }},",tok.offset,tok.length,tok.token),
-        };
-        r = r.replace("\")","\".to_string())");
+        let mut r = format!(
+            "PositionalToken {{ offset: {}, length: {}, token: Token::{:?} }},",
+            tok.offset, tok.length, tok.token
+        );
+        r = r.replace("\")", "\".to_string())");
         r
     }
     #[allow(dead_code)]
@@ -650,17 +645,18 @@ mod test {
             r += "\n";
         }
         r
-    }
+    }*/
     #[allow(dead_code)]
-    fn print_result(lib_res: &Vec<PositionalToken>) {
-        let mut r = print_pts(lib_res);
-        r = r.replace("Separator(","Separator(Separator::");
+    fn print_result(lib_res: &Vec<Local<Token>>) {
+        /*r = r.replace("Separator(","Separator(Separator::");
         r = r.replace("UnicodeFormatter(","UnicodeFormatter(Formatter::");
         r = r.replace("Number(","Number(Number::");
-        r = r.replace("Numerical(","Numerical(Numerical::");
-        println!("{}",r);
+        r = r.replace("Numerical(","Numerical(Numerical::");*/
+        for lt in lib_res {
+            println!("{:?}", lt);
+        }
     }
-
+    /*
     #[allow(dead_code)]
     fn print_ct(tok: &CharToken) -> String {
         let mut r = format!("CharToken {{ byte_offset: {}, byte_length: {}, char_offset: {}, char_length: {}, token: Token::{:?} }},",tok.byte_offset,tok.byte_length,tok.char_offset,tok.char_length,tok.token);
@@ -790,6 +786,27 @@ mod test {
             }
             panic!("Diff count: {}", diff.len() / 3);
         }
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn currency() {
+        let uws = "$ ₽ € ¥";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 1, token: Token::Special(Special::Currency('$')) },
+            PositionalToken { source: uws, offset: 1, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 2, length: 3, token: Token::Special(Special::Currency('₽')) },
+            PositionalToken { source: uws, offset: 5, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 6, length: 3, token: Token::Special(Special::Currency('€')) },
+            PositionalToken { source: uws, offset: 9, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 10, length: 2, token: Token::Special(Special::Currency('¥')) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
+        //panic!()
     }
 
     #[test]

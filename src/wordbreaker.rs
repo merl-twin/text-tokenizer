@@ -12,6 +12,7 @@ pub enum BasicToken<'t> {
     Alphanumeric(&'t str),
     Number(&'t str),
     Punctuation(char),
+    CurrencySymbol(char),
     Separator(char),
     Formatter(char),
     Mixed(&'t str),
@@ -184,6 +185,8 @@ impl<'t> WordBreaker<'t> {
         }
     }
     fn next_token(&mut self) -> Option<Local<BasicToken<'t>>> {
+        // is_ascii_punctuation makes '$' a punctuation
+
         match self.bounds.next() {
             Some(w) => {
                 let (local, w) = w.into_inner();
@@ -222,6 +225,7 @@ impl<'t> WordBreaker<'t> {
                     if c.is_ascii_punctuation()
                         || c.is_whitespace()
                         || (c.general_category_group() == GeneralCategoryGroup::Punctuation)
+                        || (c.general_category() == GeneralCategory::CurrencySymbol)
                         || (c.general_category() == GeneralCategory::Format)
                     {
                         let mut local = local;
@@ -246,6 +250,10 @@ impl<'t> WordBreaker<'t> {
                             }
                         }
 
+                        if c.general_category() == GeneralCategory::CurrencySymbol {
+                            // must be before 'is_ascii_punctuation' because of '$' sign
+                            return Some(local.local(BasicToken::CurrencySymbol(c)));
+                        }
                         if c.is_ascii_punctuation()
                             || (c.general_category_group() == GeneralCategoryGroup::Punctuation)
                         {

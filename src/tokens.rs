@@ -324,6 +324,9 @@ impl<'t> Tokens<'t> {
     fn basic_punctuation_to_pt(&mut self, c: char) -> Token {
         Token::Special(Special::Punctuation(c))
     }
+    fn basic_currency_to_pt(&mut self, c: char) -> Token {
+        Token::Special(Special::Currency(c))
+    }
     /*fn check_url(&mut self) -> Option<PositionalToken> {
             if !self.allow_structs { return None; }
             let check = if self.buffer.len()>3 {
@@ -407,6 +410,7 @@ impl<'t> Tokens<'t> {
                             }
                         }
                         BasicToken::Punctuation(..)
+                        | BasicToken::CurrencySymbol(..)
                         | BasicToken::Separator(..)
                         | BasicToken::Formatter(..)
                         | BasicToken::Mixed(..) => break,
@@ -476,6 +480,7 @@ impl<'t> Tokens<'t> {
                             }
                         }
                         BasicToken::Punctuation(..)
+                        | BasicToken::CurrencySymbol(..)
                         | BasicToken::Separator(..)
                         | BasicToken::Formatter(..)
                         | BasicToken::Mixed(..) => break,
@@ -518,6 +523,7 @@ impl<'t> Tokens<'t> {
                     BasicToken::Alphanumeric(s) => self.basic_alphanumeric_to_pt(s),
                     BasicToken::Number(s) => self.basic_number_to_pt(s),
                     BasicToken::Punctuation(s) => self.basic_punctuation_to_pt(s),
+                    BasicToken::CurrencySymbol(s) => self.basic_currency_to_pt(s),
                     BasicToken::Mixed(s) => self.basic_mixed_to_pt(s),
                     BasicToken::Separator(s) => self.basic_separator_to_pt(s),
                     BasicToken::Formatter(s) => self.basic_formater_to_pt(s),
