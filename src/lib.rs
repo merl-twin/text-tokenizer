@@ -1003,6 +1003,18 @@ mod test {
             PositionalToken {
                 source: uws,
                 offset: 0,
+                length: 8,
+                token: Token::Struct(Struct::Hashtag("hashtag".to_string())),
+            },
+            PositionalToken {
+                source: uws,
+                offset: 8,
+                length: 9,
+                token: Token::Struct(Struct::Hashtag("hashtag2".to_string())),
+            },
+            /*PositionalToken {
+                source: uws,
+                offset: 0,
                 length: 1,
                 token: Token::Special(Special::Punctuation('#')),
             },
@@ -1025,7 +1037,7 @@ mod test {
                 token: Token::Word(Word::Numerical(Numerical::Alphanumeric(
                     "hashtag2".to_string(),
                 ))),
-            },
+            },*/
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1())
@@ -2108,6 +2120,12 @@ mod test {
             PositionalToken {
                 source: uws,
                 offset: 138,
+                length: 5,
+                token: Token::Struct(Struct::Hashtag("36.6".to_string())),
+            },
+            /*PositionalToken {
+                source: uws,
+                offset: 138,
                 length: 1,
                 token: Token::Special(Special::Punctuation('#')),
             },
@@ -2116,7 +2134,7 @@ mod test {
                 offset: 139,
                 length: 4,
                 token: Token::Word(Word::Number(Number::Float(36.6))),
-            },
+            },*/
             PositionalToken {
                 source: uws,
                 offset: 143,

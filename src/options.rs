@@ -43,6 +43,7 @@ impl TokenizerParams<()> {
             .add_option(TokenizerOptions::SplitSemiColon)
             .add_option(TokenizerOptions::MergeWhites)
             .add_option(TokenizerOptions::MergePunctuation)
+            .add_option(TokenizerOptions::StructTokens)
     }
     pub fn v1_1() -> TokenizerParams<()> {
         TokenizerParams::default()
@@ -53,6 +54,7 @@ impl TokenizerParams<()> {
             .add_option(TokenizerOptions::SplitSemiColon)
             .add_option(TokenizerOptions::MergeWhites)
             .add_option(TokenizerOptions::MergePunctuation)
+            .add_option(TokenizerOptions::StructTokens)
     }
     pub fn basic() -> TokenizerParams<()> {
         TokenizerParams::default()
