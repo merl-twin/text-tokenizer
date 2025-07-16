@@ -415,6 +415,95 @@ impl TextToken {
         }
     }
 
+    #[cfg(feature = "strings")]
+    fn token_clone(&self) -> Token2 {
+        self.token.clone()
+    }
+
+    #[cfg(not(feature = "strings"))]
+    fn token_clone(&self) -> Token2 {
+        self.token
+    }
+
+    pub fn merge_tokens(
+        &self,
+        other: &TextToken,
+        new_token: Option<Token2>,
+    ) -> Result<TextToken, TextToken> {
+        let (local, left_lb, left_lc) = add_local(&self.locality, &other.locality);
+        let must_be_left = left_lb;
+        let mut ok = must_be_left == left_lc;
+        let orig = match (&self.original, &other.original) {
+            (None, None) => None,
+            (Some(o), None) | (None, Some(o)) => Some(*o),
+            (Some(s), Some(o)) => {
+                let (orig, lb, lc) = add_local(s, o);
+                ok &= must_be_left == lb;
+                ok &= must_be_left == lc;
+                Some(orig)
+            }
+        };
+        let token = TextToken {
+            locality: local,
+            original: orig,
+            token: match new_token {
+                Some(t) => t,
+                None => self.token_clone(),
+            },
+        };
+        match ok {
+            true => Ok(token),
+            false => Err(token),
+        }
+    }
+}
+
+fn add_local(slf: &Local<()>, other: &Local<()>) -> (Local<()>, bool, bool) {
+    // (_, ?, ?) slf is left by bytes, slf is left by chars
+    let b1 = slf.bytes();
+    let b2 = other.bytes();
+    let c1 = slf.chars();
+    let c2 = other.chars();
+    let (bytes, slf_is_left_by_bytes) = match b1.offset < b2.offset {
+        true => (
+            Snip {
+                offset: b1.offset,
+                length: (b2.offset + b2.length) - b1.offset,
+            },
+            true,
+        ),
+        false => (
+            Snip {
+                offset: b2.offset,
+                length: (b1.offset + b1.length) - b2.offset,
+            },
+            false,
+        ),
+    };
+    let (chars, slf_is_left_by_chars) = match c1.offset < c2.offset {
+        true => (
+            Snip {
+                offset: c1.offset,
+                length: (c2.offset + c2.length) - c1.offset,
+            },
+            true,
+        ),
+        false => (
+            Snip {
+                offset: c2.offset,
+                length: (c1.offset + c1.length) - c2.offset,
+            },
+            false,
+        ),
+    };
+    (
+        ().localize(chars, bytes),
+        slf_is_left_by_bytes,
+        slf_is_left_by_chars,
+    )
+}
+
+impl TextToken {
     pub fn test_token(lt: Local<Token2>) -> TextToken {
         let (local, token) = lt.into_inner();
         TextToken {
