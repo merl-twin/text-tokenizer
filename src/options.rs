@@ -51,6 +51,7 @@ impl TokenizerParams<()> {
             .add_option(TokenizerOptions::SplitUnderscore)
             .add_option(TokenizerOptions::SplitColon)
             .add_option(TokenizerOptions::SplitComa)
+            // NumberSign???
             .add_option(TokenizerOptions::SplitSemiColon)
             .add_option(TokenizerOptions::MergeWhites)
             .add_option(TokenizerOptions::MergePunctuation)
@@ -74,6 +75,10 @@ impl<S: SentenceBreaker> TokenizerParams<S> {
         self.options.insert(option);
         self
     }
+    pub fn remove_option(mut self, option: TokenizerOptions) -> TokenizerParams<S> {
+        self.options.remove(&option);
+        self
+    }
     pub fn with_default_sentences(mut self) -> TokenizerParams<UnicodeSentenceBreaker> {
         self.options.insert(TokenizerOptions::WithSentences);
         TokenizerParams {
@@ -87,5 +92,8 @@ impl<S: SentenceBreaker> TokenizerParams<S> {
             options: self.options,
             sentence_breaker: sb,
         }
+    }
+    pub fn options(&self) -> &BTreeSet<TokenizerOptions> {
+        &self.options
     }
 }
