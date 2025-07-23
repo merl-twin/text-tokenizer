@@ -7,6 +7,7 @@ pub use emoji::EMOJIMAP;
 mod breakers;
 pub use breakers::{SentenceBreaker, UnicodeSentenceBreaker};
 
+mod numbers;
 mod wordbreaker;
 
 mod options;
@@ -875,6 +876,107 @@ mod test {
             }
             panic!("Diff count: {}", diff.len() / 3);
         }
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn custom_numbers() {
+        let uws = "115,7 123,398,398 2,123.45 0,05%";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 5, token: Token::Word(Word::Number(Number::Float(115.7))) },            
+            PositionalToken { source: uws, offset: 5, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 6, length: 11, token: Token::Word(Word::Number(Number::Integer(123398398))) },
+            PositionalToken { source: uws, offset: 17, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 18, length: 8, token: Token::Word(Word::Number(Number::Float(2123.45))) },
+            PositionalToken { source: uws, offset: 26, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 27, length: 4, token: Token::Word(Word::Number(Number::Float(0.05))) },
+            PositionalToken { source: uws, offset: 31, length: 1, token: Token::Special(Special::Punctuation('%')) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn custom_numbers_en_1() {
+        let uws = "1.1 10,000";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Integer(10000))) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn custom_numbers_en_2() {
+        let uws = "1,000.0 10,000";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word(Word::Number(Number::Float(1000.0))) },
+            PositionalToken { source: uws, offset: 7, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 8, length: 6, token: Token::Word(Word::Number(Number::Integer(10000))) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn custom_numbers_ru_1() {
+        let uws = "1.1 10,000";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.0))) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1().add_option(TokenizerOptions::NumberUnknownComaAsDot))
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn custom_numbers_ru_2() {
+        let uws = "1,1 10,000";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.0))) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn custom_numbers_ru_3() {
+        let uws = "10000,1 10,000";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word(Word::Number(Number::Float(10000.1))) },
+            PositionalToken { source: uws, offset: 7, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 8, length: 6, token: Token::Word(Word::Number(Number::Float(10.0))) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
     }
 
     #[test]

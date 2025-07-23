@@ -1,21 +1,31 @@
-use std::collections::{BTreeSet, VecDeque};
-use std::str::FromStr;
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::Arc,
+};
 use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
 use unicode_segmentation::{UWordBounds, UnicodeSegmentation};
 
 use text_parsing::{Local, Localize, Snip};
 
-use crate::TokenizerOptions;
+use crate::{
+    TokenizerOptions,
+    numbers::{NumberChecker, NumberCounter},
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum BasicToken<'t> {
     Alphanumeric(&'t str),
-    Number(&'t str),
+    Number(&'t str, NumberChecker<'t>),
     Punctuation(char),
     CurrencySymbol(char),
     Separator(char),
     Formatter(char),
     Mixed(&'t str),
+}
+
+enum Extra<'s> {
+    None,
+    Number(NumberChecker<'s>),
 }
 
 //#[derive(Debug)]
@@ -24,18 +34,22 @@ struct ExtWordBounds<'t> {
     char_offset: usize,
     initial: &'t str,
     bounds: UWordBounds<'t>,
-    buffer: VecDeque<Local<&'t str>>,
+    buffer: VecDeque<(Local<&'t str>, Extra<'t>)>,
     ext_spliters: BTreeSet<char>,
     allow_complex: bool,
     split_dot: bool,
     split_underscore: bool,
     split_colon: bool,
-
     split_semicolon: bool,
-    split_coma: bool,
+    number_unknown_coma_as_dot: bool,
+    num_counter: Arc<NumberCounter>,
 }
 impl<'t> ExtWordBounds<'t> {
-    fn new<'a>(s: &'a str, options: &BTreeSet<TokenizerOptions>) -> ExtWordBounds<'a> {
+    fn new<'a>(
+        s: &'a str,
+        options: &BTreeSet<TokenizerOptions>,
+        num_counter: Arc<NumberCounter>,
+    ) -> ExtWordBounds<'a> {
         ExtWordBounds {
             offset: 0,
             char_offset: 0,
@@ -48,15 +62,15 @@ impl<'t> ExtWordBounds<'t> {
             split_dot: options.contains(&TokenizerOptions::SplitDot),
             split_underscore: options.contains(&TokenizerOptions::SplitUnderscore),
             split_colon: options.contains(&TokenizerOptions::SplitColon),
-
-            split_coma: options.contains(&TokenizerOptions::SplitComa),
             split_semicolon: options.contains(&TokenizerOptions::SplitSemiColon),
+            number_unknown_coma_as_dot: options.contains(&TokenizerOptions::NumberUnknownComaAsDot),
+            num_counter,
         }
     }
 }
 #[rustfmt::skip]
 impl<'t> Iterator for ExtWordBounds<'t> {
-    type Item = Local<&'t str>;
+    type Item = (Local<&'t str>, Extra<'t>);
     fn next(&mut self) -> Option<Self::Item> {
         if self.buffer.len() > 0 {
             return self.buffer.pop_front();
@@ -67,10 +81,10 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                 let mut len = 0;
                 let mut char_len = 0;
                 let mut chs = w.chars().peekable();
-                let num = match f64::from_str(w) {
-                    Ok(_) => true,
-                    Err(_) => false,
-                };
+                let num = NumberChecker::new(w,self.number_unknown_coma_as_dot,self.num_counter.stat());
+                if let Some(num) = &num {
+                    self.num_counter.push(num);
+                }
                 let mut first = true;
                 let mut split = false;
                 while let Some(c) = chs.next() {
@@ -79,7 +93,7 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                     let c_is_spliter = self.ext_spliters.contains(&c);
                     let c_is_punctuation =
                         c.general_category_group() == GeneralCategoryGroup::Punctuation;
-                    if first && (c_is_whitespace || c_is_punctuation) && chs.peek().is_some() {
+                    if first && (c_is_whitespace || c_is_punctuation) && chs.peek().is_some() && num.is_none() {
                         let mut same = true;
                         for c2 in w.chars() {
                             same = same && (c2 == c);
@@ -94,10 +108,9 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                         || split
                         //|| ( c_is_whitespace && !self.merge_whites )
                         || ( (c == '\u{200d}') && chs.peek().is_none() )
-                        || ( c_is_punctuation && !num && !self.allow_complex ) // && !exceptions_contain_c 
-                        || ( (c == '.') && !num && self.split_dot )
-                        || ( (c == ',') && !num && self.split_coma )
-                        || ( (c == '_') && !num && self.split_underscore )
+                        || ( c_is_punctuation && num.is_none() && !self.allow_complex ) // && !exceptions_contain_c 
+                        || ( (c == '.') && num.is_none() && self.split_dot )
+                        || ( (c == '_') && num.is_none() && self.split_underscore )
                         || ( (c == ':') && self.split_colon )
                         || ( (c == ';') && self.split_semicolon )
                     {
@@ -106,9 +119,10 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                                 Snip { offset: self.char_offset, length: char_len },
                                 Snip { offset: self.offset, length: len },
                             );
-                            self.buffer.push_back(
+                            self.buffer.push_back((
                                 local.local(&self.initial[self.offset..self.offset + len]),
-                            );
+                                Extra::None
+                            ));
                             self.offset += len;
                             self.char_offset += char_len;
                             len = 0;
@@ -117,9 +131,9 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                         let local = ().localize(
                             Snip { offset: self.char_offset, length: 1 },
                             Snip { offset: self.offset, length: ln },
-                        );
+                        );                        
                         self.buffer
-                            .push_back(local.local(&self.initial[self.offset..self.offset + ln]));
+                            .push_back((local.local(&self.initial[self.offset..self.offset + ln]), Extra::None));
                         self.offset += ln;
                         self.char_offset += 1;
                     } else {
@@ -132,8 +146,12 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                         Snip { offset: self.char_offset, length: char_len },
                         Snip { offset: self.offset, length: len },
                     );
+                    let extra = match num {
+                        None => Extra::None,
+                        Some(num) => Extra::Number(num),
+                    };
                     self.buffer
-                        .push_back(local.local(&self.initial[self.offset..self.offset + len]));
+                        .push_back((local.local(&self.initial[self.offset..self.offset + len]),extra));
                     self.offset += len;
                     self.char_offset += char_len;
                 }
@@ -159,65 +177,48 @@ pub(crate) struct WordBreaker<'t> {
     merge_whites: bool,
     merge_punct: bool,
     split_number_sign: bool,
+    number_unknown_coma_as_dot: bool,
     bounds: std::iter::Peekable<ExtWordBounds<'t>>,
+    num_counter: Arc<NumberCounter>,
 }
 impl<'t> WordBreaker<'t> {
     pub(crate) fn new<'a>(s: &'a str, options: &BTreeSet<TokenizerOptions>) -> WordBreaker<'a> {
+        let num_counter = Arc::new(NumberCounter::new());
         WordBreaker {
             initial: s,
             prev_is_separator: true,
-            merge_whites: if options.contains(&TokenizerOptions::MergeWhites) {
-                true
-            } else {
-                false
-            },
-            merge_punct: if options.contains(&TokenizerOptions::MergePunctuation) {
-                true
-            } else {
-                false
-            },
-            split_number_sign: if options.contains(&TokenizerOptions::SplitNumberSign) {
-                true
-            } else {
-                false
-            },
-            bounds: ExtWordBounds::new(s, options).peekable(),
+            merge_whites: options.contains(&TokenizerOptions::MergeWhites),
+            merge_punct: options.contains(&TokenizerOptions::MergePunctuation),
+            split_number_sign: options.contains(&TokenizerOptions::SplitNumberSign),
+            number_unknown_coma_as_dot: options.contains(&TokenizerOptions::NumberUnknownComaAsDot),
+            bounds: ExtWordBounds::new(s, options, num_counter.clone()).peekable(),
+            num_counter,
         }
     }
     fn next_token(&mut self) -> Option<Local<BasicToken<'t>>> {
         // is_ascii_punctuation makes '$' a punctuation
 
         match self.bounds.next() {
-            Some(w) => {
+            Some((w, extra)) => {
                 let (local, w) = w.into_inner();
                 if let Some(c) = one_char_word(w) {
                     if ((c == '+') || (c == '-'))
                         && self.prev_is_separator
                         && !self.split_number_sign
                     {
-                        if let Some(w2) = self.bounds.peek() {
-                            let (loc2, w2) = w2.into_inner();
-                            let mut num = true;
-                            let mut dot_count = 0;
-                            for c in w2.chars() {
-                                num = num && (c.is_digit(10) || (c == '.'));
-                                if c == '.' {
-                                    dot_count += 1;
-                                }
-                            }
-                            if dot_count > 1 {
-                                num = false;
-                            }
-
-                            if num {
-                                if let Ok(local) = Local::from_segment(local, loc2) {
-                                    self.bounds.next();
-                                    let Snip {
-                                        offset: off,
-                                        length: len,
-                                    } = local.bytes();
-                                    let p = &self.initial[off..off + len];
-                                    return Some(local.local(BasicToken::Number(p)));
+                        if let Some((w2, extra2)) = self.bounds.peek() {
+                            let (loc2, _) = w2.into_inner();
+                            if let Extra::Number(mut num) = *extra2 {
+                                if num.push_sign(c) {
+                                    if let Ok(local) = Local::from_segment(local, loc2) {
+                                        self.bounds.next();
+                                        let Snip {
+                                            offset: off,
+                                            length: len,
+                                        } = local.bytes();
+                                        let p = &self.initial[off..off + len];
+                                        return Some(local.local(BasicToken::Number(p, num)));
+                                    }
                                 }
                             }
                         }
@@ -237,7 +238,7 @@ impl<'t> WordBreaker<'t> {
                         {
                             loop {
                                 match self.bounds.peek() {
-                                    Some(p) if *p.data() == w => {
+                                    Some((p, _extra)) if *p.data() == w => {
                                         let (loc2, _) = p.into_inner();
                                         match Local::from_segment(local, loc2) {
                                             Ok(new_loc) => local = new_loc,
@@ -266,9 +267,19 @@ impl<'t> WordBreaker<'t> {
                         }
                     }
                 } // if c is one_char_word
+
+                if let Extra::Number(num) = extra {
+                    return Some(local.local(BasicToken::Number(w, num)));
+                }
+
+                if let Some(num) =
+                    NumberChecker::new(w, self.number_unknown_coma_as_dot, self.num_counter.stat())
+                {
+                    self.num_counter.push(&num);
+                    return Some(local.local(BasicToken::Number(w, num)));
+                }
+
                 let mut an = true;
-                let mut num = true;
-                let mut dot_count = 0;
                 for c in w.chars() {
                     an = an
                         && (c.is_alphanumeric()
@@ -277,16 +288,6 @@ impl<'t> WordBreaker<'t> {
                             || (c == '-')
                             || (c == '+')
                             || (c == '_'));
-                    num = num && (c.is_digit(10) || (c == '.') || (c == '-') || (c == '+'));
-                    if c == '.' {
-                        dot_count += 1;
-                    }
-                }
-                if dot_count > 1 {
-                    num = false;
-                }
-                if num {
-                    return Some(local.local(BasicToken::Number(w)));
                 }
                 if an {
                     return Some(local.local(BasicToken::Alphanumeric(w)));

@@ -1,12 +1,12 @@
 use std::collections::{BTreeSet, VecDeque};
-use std::str::FromStr;
 use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
 
 use text_parsing::Local;
 
 use crate::{
-    EMOJIMAP, Formatter, IntoTokenizer, Number, Numerical, SentenceBreaker, Separator, Special,
-    Struct, Token, TokenizerOptions, TokenizerParams, Unicode, Word,
+    EMOJIMAP, Formatter, IntoTokenizer, Numerical, SentenceBreaker, Separator, Special, Struct,
+    Token, TokenizerOptions, TokenizerParams, Unicode, Word,
+    numbers::NumberChecker,
     wordbreaker::{BasicToken, WordBreaker, one_char_word},
 };
 
@@ -80,37 +80,19 @@ impl<'t> Tokens<'t> {
             _ => Formatter::Char(c),
         }))
     }
-    fn basic_number_to_pt(&mut self, s: &str) -> Token {
-        Token::Word(match i64::from_str(s) {
-            Ok(n) => match s.chars().next() {
-                Some('0') => {
-                    #[cfg(not(feature = "strings"))]
-                    {
-                        Word::Number(Number::ZeroInteger { i: n })
-                    }
-                    #[cfg(feature = "strings")]
-                    {
-                        Word::Number(Number::ZeroInteger {
-                            i: n,
-                            s: s.to_string(),
-                        })
-                    }
+    fn basic_number_to_pt(&mut self, _s: &str, num: NumberChecker) -> Token {
+        Token::Word(match num.into_number() {
+            Some(num) => Word::Number(num),
+            None => {
+                #[cfg(feature = "strings")]
+                {
+                    Word::Word(_s.to_string())
                 }
-                Some(_) | None => Word::Number(Number::Integer(n)),
-            },
-            Err(_) => match f64::from_str(s) {
-                Ok(n) => Word::Number(Number::Float(n)),
-                Err(..) => {
-                    #[cfg(feature = "strings")]
-                    {
-                        Word::Word(s.to_string())
-                    }
-                    #[cfg(not(feature = "strings"))]
-                    {
-                        Word::Word
-                    }
+                #[cfg(not(feature = "strings"))]
+                {
+                    Word::Word
                 }
-            },
+            }
         })
     }
     fn basic_mixed_to_pt(&mut self, s: &str) -> Token {
@@ -396,7 +378,7 @@ impl<'t> Tokens<'t> {
                             }
                             Err(_) => break,
                         },
-                        BasicToken::Alphanumeric(_s) | BasicToken::Number(_s) => {
+                        BasicToken::Alphanumeric(_s) | BasicToken::Number(_s, _) => {
                             match Local::from_segment(loc, nloc) {
                                 Ok(lc) => {
                                     #[cfg(feature = "strings")]
@@ -466,7 +448,7 @@ impl<'t> Tokens<'t> {
                             }
                             Err(_) => break,
                         },
-                        BasicToken::Alphanumeric(_s) | BasicToken::Number(_s) => {
+                        BasicToken::Alphanumeric(_s) | BasicToken::Number(_s, _) => {
                             match Local::from_segment(loc, nloc) {
                                 Ok(lc) => {
                                     #[cfg(feature = "strings")]
@@ -521,7 +503,7 @@ impl<'t> Tokens<'t> {
                 let (local, tok) = local_tok.into_inner();
                 Some(local.local(match tok {
                     BasicToken::Alphanumeric(s) => self.basic_alphanumeric_to_pt(s),
-                    BasicToken::Number(s) => self.basic_number_to_pt(s),
+                    BasicToken::Number(s, num) => self.basic_number_to_pt(s, num),
                     BasicToken::Punctuation(s) => self.basic_punctuation_to_pt(s),
                     BasicToken::CurrencySymbol(s) => self.basic_currency_to_pt(s),
                     BasicToken::Mixed(s) => self.basic_mixed_to_pt(s),
