@@ -25,7 +25,7 @@ pub enum Error {
     TextParser(text_parsing::Error),
 }
 
-const EPS: f64 = 1e-8;
+pub const EPS: f64 = 1e-8;
 
 #[cfg(feature = "strings")]
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
@@ -901,6 +901,22 @@ mod test {
 
     #[test]
     #[rustfmt::skip]
+    fn custom_numbers_ftoi() {
+        let uws = "1.1 10.000";
+        let result = vec![
+            PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
+            PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Integer(10))) },
+        ];
+        let lib_res = uws
+            .into_tokenizer(TokenizerParams::v1())
+            .collect::<Vec<_>>();
+        //print_result(&lib_res);
+        check_results(&result, &lib_res, uws);
+    }
+
+    #[test]
+    #[rustfmt::skip]
     fn custom_numbers_en_1() {
         let uws = "1.1 10,000";
         let result = vec![
@@ -918,9 +934,9 @@ mod test {
     #[test]
     #[rustfmt::skip]
     fn custom_numbers_en_2() {
-        let uws = "1,000.0 10,000";
+        let uws = "1,000.1 10,000";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word(Word::Number(Number::Float(1000.0))) },
+            PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word(Word::Number(Number::Float(1000.1))) },
             PositionalToken { source: uws, offset: 7, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { source: uws, offset: 8, length: 6, token: Token::Word(Word::Number(Number::Integer(10000))) },
         ];
@@ -934,11 +950,11 @@ mod test {
     #[test]
     #[rustfmt::skip]
     fn custom_numbers_ru_1() {
-        let uws = "1.1 10,000";
+        let uws = "1.1 10,001";
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
             PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.0))) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.001))) },
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1().add_option(TokenizerOptions::NumberUnknownComaAsDot))
@@ -950,11 +966,11 @@ mod test {
     #[test]
     #[rustfmt::skip]
     fn custom_numbers_ru_2() {
-        let uws = "1,1 10,000";
+        let uws = "1,1 10,001";
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
             PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.0))) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.001))) },
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1())
@@ -966,11 +982,11 @@ mod test {
     #[test]
     #[rustfmt::skip]
     fn custom_numbers_ru_3() {
-        let uws = "10000,1 10,000";
+        let uws = "10000,1 10,001";
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word(Word::Number(Number::Float(10000.1))) },
             PositionalToken { source: uws, offset: 7, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { source: uws, offset: 8, length: 6, token: Token::Word(Word::Number(Number::Float(10.0))) },
+            PositionalToken { source: uws, offset: 8, length: 6, token: Token::Word(Word::Number(Number::Float(10.001))) },
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1())

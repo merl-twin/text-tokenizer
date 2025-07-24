@@ -59,6 +59,22 @@ impl<'s> NumberCheckerInner<'s> {
             NumberCheckerInner::OverflowFloat(s) => NumberCheckerInner::OverflowFloat(s),
         }
     }
+    fn check_eps(&mut self) {
+        match self {
+            NumberCheckerInner::SimpleFloat(n) => {
+                let toi = n.round();
+                if (*n - toi).abs() < crate::EPS {
+                    if ((i64::MIN as f64) < toi) && (toi < i64::MAX as f64) {
+                        *self = NumberCheckerInner::SimpleInt(toi as i64);
+                    }
+                }
+            }
+            NumberCheckerInner::SimpleInt(_)
+            | NumberCheckerInner::HugeInt(_)
+            | NumberCheckerInner::OverflowInt(_)
+            | NumberCheckerInner::OverflowFloat(_) => {}
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 enum Sign {
@@ -92,7 +108,7 @@ impl<'s> NumberChecker<'s> {
             Some('+') => (false, Some(Sign::Plus)),
             _ => (false, None),
         };
-        let subtype = match i64::from_str(src) {
+        let mut subtype = match i64::from_str(src) {
             Ok(i) => NumberCheckerInner::SimpleInt(i),
             Err(_) => match f64::from_str(src) {
                 Ok(f) => {
@@ -246,6 +262,7 @@ impl<'s> NumberChecker<'s> {
                             return None;
                         }
                     };
+
                     match sign {
                         Some(Sign::Minus) => number_without_sign.negative(),
                         Some(Sign::Plus) | None => number_without_sign,
@@ -253,6 +270,7 @@ impl<'s> NumberChecker<'s> {
                 }
             },
         };
+        subtype.check_eps();
         Some(NumberChecker {
             src,
             zero,
