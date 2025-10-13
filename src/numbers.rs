@@ -75,6 +75,21 @@ impl<'s> NumberCheckerInner<'s> {
             | NumberCheckerInner::OverflowFloat(_) => {}
         }
     }
+    fn int<'q>(s: &str, src: &'q str) -> NumberCheckerInner<'q> {
+        match i64::from_str(s) {
+            Ok(i) => NumberCheckerInner::SimpleInt(i),
+            Err(_) => match f64::from_str(s) {
+                Ok(f) => NumberCheckerInner::HugeInt(f),
+                Err(_) => NumberCheckerInner::OverflowInt(src),
+            },
+        }
+    }
+    fn float<'q>(s: &str, src: &'q str) -> NumberCheckerInner<'q> {
+        match f64::from_str(&s) {
+            Ok(f) => NumberCheckerInner::SimpleFloat(f),
+            Err(_) => NumberCheckerInner::OverflowFloat(src),
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 enum Sign {
@@ -110,165 +125,202 @@ impl<'s> NumberChecker<'s> {
         };
         let mut subtype = match i64::from_str(src) {
             Ok(i) => NumberCheckerInner::SimpleInt(i),
-            Err(_) => match f64::from_str(src) {
-                Ok(f) => {
-                    coma_prop = Some(Coma::Thousand);
-                    NumberCheckerInner::SimpleFloat(f)
-                }
-                Err(_) => {
-                    // checking only coma thousand-split + and dot
-                    // russian notation: coma instead of dot
-                    let mut coma_count = 0;
-                    let mut dot_count = 0;
-                    let mut digits = 0;
-                    let mut first_digit_group = 0;
+            Err(_) => {
+                // f64 check removed, because a lot of russian money amounts has a specific notation: 955.000₽
+                /*match f64::from_str(src) {
+                    Ok(f) => {
+                        coma_prop = Some(Coma::Thousand);
+                        NumberCheckerInner::SimpleFloat(f)
+                    }
+                    Err(_) => {}
+                }*/
 
-                    let s = match sign.is_some() {
-                        true => &src[1..],
-                        false => src,
-                    };
-                    for c in s.chars() {
-                        match c {
-                            _ if c.is_digit(10) => digits += 1,
-                            ',' => {
-                                if dot_count > 0 {
+                // checking only coma thousand-split + and dot
+                // russian notation: coma instead of dot, and some dots with coma
+                let mut coma_count = 0;
+                let mut dot_count = 0;
+                let mut digits = 0;
+                let mut first_digit_group = 0;
+                let mut last_dc = '\0';
+
+                let s = match sign.is_some() {
+                    true => &src[1..],
+                    false => src,
+                };
+                for c in s.chars() {
+                    match c {
+                        _ if c.is_digit(10) => digits += 1,
+                        ',' | '.' => {
+                            if (coma_count + dot_count) == 0 {
+                                first_digit_group = digits;
+                            } else {
+                                if digits != 3 {
+                                    // non 3-digit middle group
                                     return None;
                                 }
-                                if coma_count == 0 {
-                                    first_digit_group = digits;
-                                } else {
-                                    if digits != 3 {
-                                        // non 3-digit middle group
-                                        return None;
+                            }
+                            match c {
+                                ',' => coma_count += 1,
+                                '.' => dot_count += 1,
+                                _ => unreachable!(),
+                            }
+                            digits = 0;
+                            last_dc = c;
+                        }
+                        _ => return None,
+                    }
+                }
+                let last_digit_group = digits;
+                if (first_digit_group == 0) || (last_digit_group == 0) {
+                    return None;
+                }
+
+                /*
+                // previous version with a_kind_of statistics
+
+                (1, 0) => {
+                        // number with 1 coma only
+                        match (first_digit_group, last_digit_group) {
+                            (1, 3) | (2, 3) | (3, 3) => {
+                                // unknown
+                                let en_notation = match unknown_coma_as_dot {
+                                    true => false,
+                                    false => match unknown_by_stat {
+                                        Some(Coma::Fraction) => false,
+                                        Some(Coma::Thousand) => true,
+                                        None => true, // by default en notation
+                                    },
+                                };
+                                match en_notation {
+                                    false => {
+                                        // russian notation
+                                        let s = s.replace(',', ".");
+                                        NumberCheckerInner::float(&s, src)
+                                    }
+                                    true => {
+                                        // english notation
+                                        let s = s.replace(',', "");
+                                        NumberCheckerInner::int(&s, src)
                                     }
                                 }
-                                coma_count += 1;
-                                digits = 0;
+                            }
+                            (_, _) => {
+                                // russian notation coma = dot
+                                coma_prop = Some(Coma::Fraction);
+                                let s = s.replace(',', ".");
+                                NumberCheckerInner::float(&s, src)
+                            }
+                        }
+                    }*/
+
+                // number has only comas, digits and dots
+                // coma or dot not first and not last
+                // all middle (between comas/dot) digit groups are of length 3
+                let mut number_without_sign = match (coma_count, dot_count) {
+                    (0, 0) => {
+                        // simple int ?, no comas or dots
+                        NumberCheckerInner::int(s, src)
+                    }
+                    (1, 0) => {
+                        // one coma
+                        match (first_digit_group, last_digit_group) {
+                            (1, 3) | (2, 3) | (3, 3) => {
+                                // unknown: X,XXX  XX,XXX  XXX,XXX
+                                // maybe en/ru
+
+                                // english notation
+                                coma_prop = Some(Coma::Thousand);
+                                let s = s.replace(',', "");
+                                NumberCheckerInner::int(&s, src)
+                            }
+                            (_, _) => {
+                                // russian notation coma is a period
+                                coma_prop = Some(Coma::Fraction);
+                                let s = s.replace(',', ".");
+                                NumberCheckerInner::float(&s, src)
+                            }
+                        }
+                    }
+                    (0, 1) => {
+                        // one dot
+                        match (first_digit_group, last_digit_group) {
+                            (1, 3) | (2, 3) | (3, 3) => {
+                                // unknown: X.XXX  XX.XXX  XXX.XXX
+                                // maybe en/ru
+
+                                // russian notation
+                                coma_prop = Some(Coma::Fraction);
+                                let s = s.replace('.', "");
+                                NumberCheckerInner::int(&s, src)
+                            }
+                            (_, _) => {
+                                // english notation dot is a period
+                                coma_prop = Some(Coma::Thousand);
+                                NumberCheckerInner::float(s, src)
+                            }
+                        }
+                    }
+                    (1, 1) => {
+                        // one dot and one coma
+                        // for now: last is a period
+                        // maybe en/ru
+                        match last_dc {
+                            ',' => {
+                                // XXX.XXX,XXX
+                                coma_prop = Some(Coma::Fraction);
+                                let s = s.replace('.', "");
+                                let s = s.replace(',', ".");
+                                NumberCheckerInner::float(&s, src)
                             }
                             '.' => {
-                                if dot_count > 0 {
-                                    return None;
-                                }
-                                if coma_count == 0 {
-                                    first_digit_group = digits;
-                                } else {
-                                    if digits != 3 {
-                                        // non 3-digit middle group
-                                        return None;
-                                    }
-                                }
-                                dot_count += 1;
-                                digits = 0;
+                                // XXX,XXX.XXX
+                                coma_prop = Some(Coma::Thousand);
+                                let s = s.replace(',', "");
+                                NumberCheckerInner::float(&s, src)
                             }
-                            _ => return None,
+                            _ => unreachable!(), // safe: coma_count + dot_count > 0, last_dc != '\0'
                         }
                     }
-                    let last_digit_group = digits;
-                    if (first_digit_group == 0) || (last_digit_group == 0) {
+                    (_, 0) => {
+                        // more then one coma, no dots; no last_digit_group check for now
+                        // integer, coma is a thousand splitter
+                        coma_prop = Some(Coma::Thousand);
+                        let s = s.replace(',', "");
+                        NumberCheckerInner::int(&s, src)
+                    }
+                    (_, 1) => {
+                        // more then one coma, one dot
+                        // float, coma is a thousand splitter
+                        coma_prop = Some(Coma::Thousand);
+                        let s = s.replace(',', "");
+                        NumberCheckerInner::float(&s, src)
+                    }
+                    (0, _) => {
+                        // more then one dot, no comas; no last_digit_group check for now
+                        // integer, dot is a thousand splitter
+                        coma_prop = Some(Coma::Fraction);
+                        let s = s.replace('.', "");
+                        NumberCheckerInner::int(&s, src)
+                    }
+                    (1, _) => {
+                        // more then one dot, one coma
+                        // float, dot is a thousand splitter, coma is a fraction
+                        coma_prop = Some(Coma::Fraction);
+                        let s = s.replace('.', "");
+                        let s = s.replace(',', ".");
+                        NumberCheckerInner::float(&s, src)
+                    }
+                    (_, _) => {
+                        // many dots and comas
                         return None;
                     }
+                };
 
-                    // number has only comas, digits and maybe dot
-                    // coma or dot not first and not last
-                    // all middle (between comas/dot) digit groups are of length 3
-                    let mut number_without_sign = match (coma_count, dot_count) {
-                        (0, 0) => {
-                            // simple int ?, no comas or dot
-                            match i64::from_str(s) {
-                                Ok(i) => NumberCheckerInner::SimpleInt(i),
-                                Err(_) => match f64::from_str(s) {
-                                    Ok(f) => NumberCheckerInner::HugeInt(f),
-                                    Err(_) => NumberCheckerInner::OverflowInt(src),
-                                },
-                            }
-                        }
-                        (1, 0) => {
-                            // number with 1 coma only
-                            match (first_digit_group, last_digit_group) {
-                                (1, 3) | (2, 3) | (3, 3) => {
-                                    // unknown
-                                    let en_notation = match unknown_coma_as_dot {
-                                        true => false,
-                                        false => match unknown_by_stat {
-                                            Some(Coma::Fraction) => false,
-                                            Some(Coma::Thousand) => true,
-                                            None => true, // by default en notation
-                                        },
-                                    };
-                                    match en_notation {
-                                        false => {
-                                            // russian notation
-                                            let s = s.replace(',', ".");
-                                            match f64::from_str(&s) {
-                                                Ok(f) => NumberCheckerInner::SimpleFloat(f),
-                                                Err(_) => NumberCheckerInner::OverflowFloat(src),
-                                            }
-                                        }
-                                        true => {
-                                            // english notation
-                                            let s = s.replace(',', "");
-                                            match i64::from_str(&s) {
-                                                Ok(i) => NumberCheckerInner::SimpleInt(i),
-                                                Err(_) => match f64::from_str(&s) {
-                                                    Ok(f) => NumberCheckerInner::HugeInt(f),
-                                                    Err(_) => NumberCheckerInner::OverflowInt(src),
-                                                },
-                                            }
-                                        }
-                                    }
-                                }
-                                (_, _) => {
-                                    // russian notation coma = dot
-                                    coma_prop = Some(Coma::Fraction);
-                                    let s = s.replace(',', ".");
-                                    match f64::from_str(&s) {
-                                        Ok(f) => NumberCheckerInner::SimpleFloat(f),
-                                        Err(_) => NumberCheckerInner::OverflowFloat(src),
-                                    }
-                                }
-                            }
-                        }
-                        (_, 0) => {
-                            // integer, coma is a thousand splitter
-                            coma_prop = Some(Coma::Thousand);
-                            let s = s.replace(',', "");
-                            match i64::from_str(&s) {
-                                Ok(i) => NumberCheckerInner::SimpleInt(i),
-                                Err(_) => match f64::from_str(&s) {
-                                    Ok(f) => NumberCheckerInner::HugeInt(f),
-                                    Err(_) => NumberCheckerInner::OverflowInt(src),
-                                },
-                            }
-                        }
-                        (0, 1) => {
-                            // simple float ?, no comas
-                            coma_prop = Some(Coma::Thousand);
-                            match f64::from_str(s) {
-                                Ok(f) => NumberCheckerInner::SimpleFloat(f),
-                                Err(_) => NumberCheckerInner::OverflowFloat(src),
-                            }
-                        }
-                        (_, 1) => {
-                            // float, coma is a thousand splitter
-                            coma_prop = Some(Coma::Thousand);
-                            let s = s.replace(',', "");
-                            match f64::from_str(&s) {
-                                Ok(f) => NumberCheckerInner::SimpleFloat(f),
-                                Err(_) => NumberCheckerInner::OverflowFloat(src),
-                            }
-                        }
-                        (_, _) => {
-                            // many dots
-                            return None;
-                        }
-                    };
-
-                    match sign {
-                        Some(Sign::Minus) => number_without_sign.negative(),
-                        Some(Sign::Plus) | None => number_without_sign,
-                    }
+                match sign {
+                    Some(Sign::Minus) => number_without_sign.negative(),
+                    Some(Sign::Plus) | None => number_without_sign,
                 }
-            },
+            }
         };
         subtype.check_eps();
         Some(NumberChecker {

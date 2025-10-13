@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 use text_parsing::{Breaker, IntoSource, Local, Localize, Snip, Source, SourceEvent};
 
 mod emoji;
@@ -19,6 +19,11 @@ pub use tokens::Tokens;
 mod text_tokens;
 use text_tokens::InnerBound;
 pub use text_tokens::TextTokens;
+
+#[cfg(test)]
+mod test {
+    mod numbers_ru_en;
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -353,7 +358,7 @@ pub enum Bound {
 }
 
 #[cfg(feature = "strings")]
-#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct TextToken {
     locality: Local<()>,
     original: Option<Local<()>>,
@@ -361,11 +366,27 @@ pub struct TextToken {
 }
 
 #[cfg(not(feature = "strings"))]
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
 pub struct TextToken {
     locality: Local<()>,
     original: Option<Local<()>>,
     pub token: Token2,
+}
+
+impl fmt::Debug for TextToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "TextToken {{ local: {:?} [{:?}] }}, ",
+            self.locality.bytes(),
+            self.locality.chars()
+        )?;
+        match &self.original {
+            Some(orig) => write!(f, "orig: {:?} [{:?}], ", orig.bytes(), orig.chars())?,
+            None => {}
+        }
+        write!(f, "token: {:?} }}", self.token)
+    }
 }
 
 #[cfg(test)]
@@ -627,7 +648,7 @@ impl Token2 {
 
 #[cfg(test)]
 #[cfg(not(feature = "strings"))]
-mod test {
+mod test_no_strings {
     use super::*;
     use text_parsing::{
         IntoPipeParser, IntoSource, Localize, ParserExt, SourceExt, entities, tagger,
@@ -712,7 +733,7 @@ mod test_v0_5 {
 
 #[cfg(test)]
 #[cfg(feature = "strings")]
-mod test {
+mod test_strings {
     use super::*;
     use text_parsing::{
         IntoPipeParser, IntoSource, Localize, ParserExt, SourceExt, entities, tagger,
@@ -902,11 +923,11 @@ mod test {
     #[test]
     #[rustfmt::skip]
     fn custom_numbers_ftoi() {
-        let uws = "1.1 10.000";
+        let uws = "1.1 10.0000";
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
             PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Integer(10))) },
+            PositionalToken { source: uws, offset: 4, length: 7, token: Token::Word(Word::Number(Number::Integer(10))) },
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1())
@@ -954,7 +975,7 @@ mod test {
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
             PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.001))) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Integer(10001))) }, // (Number::Float(10.001)
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1().add_option(TokenizerOptions::NumberUnknownComaAsDot))
@@ -970,7 +991,7 @@ mod test {
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 3, token: Token::Word(Word::Number(Number::Float(1.1))) },            
             PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Float(10.001))) },
+            PositionalToken { source: uws, offset: 4, length: 6, token: Token::Word(Word::Number(Number::Integer(10001))) }, // (Number::Float(10.001)
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1())
@@ -986,7 +1007,7 @@ mod test {
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 7, token: Token::Word(Word::Number(Number::Float(10000.1))) },
             PositionalToken { source: uws, offset: 7, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { source: uws, offset: 8, length: 6, token: Token::Word(Word::Number(Number::Float(10.001))) },
+            PositionalToken { source: uws, offset: 8, length: 6, token: Token::Word(Word::Number(Number::Integer(10001))) }, // (Number::Float(10.001)
         ];
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1())
@@ -5163,9 +5184,8 @@ mod test {
                 source: uws,
                 offset: 29,
                 length: 19,
-                token: Token::Word(Word::Numerical(Numerical::DotSeparated(
-                    "123.568.365.234.578".to_string(),
-                ))),
+                // ru notation
+                token: Token::Word(Word::Number(Number::Integer(123568365234578))),
             },
             PositionalToken {
                 source: uws,
@@ -5257,7 +5277,8 @@ mod test {
         let lib_res = uws
             .into_tokenizer(TokenizerParams::v1())
             .collect::<Vec<_>>();
-        //print_result(&lib_res); panic!("");
+        //print_result(&lib_res);
+        //panic!("");
         let result = vec![
             PositionalToken {
                 source: uws,
@@ -5373,6 +5394,13 @@ mod test {
             PositionalToken {
                 source: uws,
                 offset: 29,
+                length: 19,
+                // ru notation
+                token: Token::Word(Word::Number(Number::Integer(123568365234578))),
+            },
+            /*PositionalToken {
+                source: uws,
+                offset: 29,
                 length: 3,
                 token: Token::Word(Word::Number(Number::Integer(123))),
             },
@@ -5423,7 +5451,7 @@ mod test {
                 offset: 45,
                 length: 3,
                 token: Token::Word(Word::Number(Number::Integer(578))),
-            },
+            },*/
             PositionalToken {
                 source: uws,
                 offset: 48,
