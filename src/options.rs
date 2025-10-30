@@ -19,7 +19,8 @@ pub enum TokenizerOptions {
     MergePunctuation,
     MergeWhites,
     WithSentences,
-    NumberUnknownComaAsDot,
+    NumberDefaultEnNotation,
+    NumberDefaultRuNotation,
 }
 
 pub struct TokenizerParams<S: SentenceBreaker> {

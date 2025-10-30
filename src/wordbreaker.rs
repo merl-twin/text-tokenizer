@@ -9,7 +9,7 @@ use text_parsing::{Local, Localize, Snip};
 
 use crate::{
     TokenizerOptions,
-    numbers::{NumberChecker, NumberCounter},
+    numbers::{NumberChecker, NumberCounter, NumberNotation},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -41,7 +41,7 @@ struct ExtWordBounds<'t> {
     split_underscore: bool,
     split_colon: bool,
     split_semicolon: bool,
-    number_unknown_coma_as_dot: bool,
+    number_unknown: NumberNotation,
     num_counter: Arc<NumberCounter>,
 }
 impl<'t> ExtWordBounds<'t> {
@@ -63,7 +63,7 @@ impl<'t> ExtWordBounds<'t> {
             split_underscore: options.contains(&TokenizerOptions::SplitUnderscore),
             split_colon: options.contains(&TokenizerOptions::SplitColon),
             split_semicolon: options.contains(&TokenizerOptions::SplitSemiColon),
-            number_unknown_coma_as_dot: options.contains(&TokenizerOptions::NumberUnknownComaAsDot),
+            number_unknown: NumberNotation::from_options(options),
             num_counter,
         }
     }
@@ -81,7 +81,7 @@ impl<'t> Iterator for ExtWordBounds<'t> {
                 let mut len = 0;
                 let mut char_len = 0;
                 let mut chs = w.chars().peekable();
-                let num = NumberChecker::new(w,self.number_unknown_coma_as_dot,self.num_counter.stat());
+                let num = NumberChecker::new(w,self.number_unknown,self.num_counter.stat());
                 if let Some(num) = &num {
                     self.num_counter.push(num);
                 }
@@ -177,7 +177,7 @@ pub(crate) struct WordBreaker<'t> {
     merge_whites: bool,
     merge_punct: bool,
     split_number_sign: bool,
-    number_unknown_coma_as_dot: bool,
+    number_unknown: NumberNotation,
     bounds: std::iter::Peekable<ExtWordBounds<'t>>,
     num_counter: Arc<NumberCounter>,
 }
@@ -190,7 +190,7 @@ impl<'t> WordBreaker<'t> {
             merge_whites: options.contains(&TokenizerOptions::MergeWhites),
             merge_punct: options.contains(&TokenizerOptions::MergePunctuation),
             split_number_sign: options.contains(&TokenizerOptions::SplitNumberSign),
-            number_unknown_coma_as_dot: options.contains(&TokenizerOptions::NumberUnknownComaAsDot),
+            number_unknown: NumberNotation::from_options(options),
             bounds: ExtWordBounds::new(s, options, num_counter.clone()).peekable(),
             num_counter,
         }
@@ -273,7 +273,7 @@ impl<'t> WordBreaker<'t> {
                 }
 
                 if let Some(num) =
-                    NumberChecker::new(w, self.number_unknown_coma_as_dot, self.num_counter.stat())
+                    NumberChecker::new(w, self.number_unknown, self.num_counter.stat())
                 {
                     self.num_counter.push(&num);
                     return Some(local.local(BasicToken::Number(w, num)));

@@ -1,9 +1,29 @@
 use std::{
+    collections::BTreeSet,
     str::FromStr,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::Number;
+use crate::{Number, TokenizerOptions};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NumberNotation {
+    En,
+    Ru,
+}
+impl NumberNotation {
+    pub fn from_options(options: &BTreeSet<TokenizerOptions>) -> NumberNotation {
+        match (
+            options.contains(&TokenizerOptions::NumberDefaultEnNotation),
+            options.contains(&TokenizerOptions::NumberDefaultRuNotation),
+        ) {
+            (false, false) => NumberNotation::En, // no flags
+            (true, true) => NumberNotation::Ru,   // both flags
+            (true, false) => NumberNotation::En,
+            (false, true) => NumberNotation::Ru,
+        }
+    }
+}
 
 pub struct NumberCounter {
     // notation counter
@@ -113,8 +133,8 @@ pub(crate) struct NumberChecker<'s> {
 impl<'s> NumberChecker<'s> {
     pub fn new(
         src: &str,
-        unknown_coma_as_dot: bool,
-        unknown_by_stat: Option<Coma>,
+        unknown: NumberNotation,
+        _unknown_by_stat: Option<Coma>,
     ) -> Option<NumberChecker> {
         let mut coma_prop = None;
         let (zero, sign) = match src.chars().next() {
@@ -141,7 +161,7 @@ impl<'s> NumberChecker<'s> {
                 let mut dot_count = 0;
                 let mut digits = 0;
                 let mut first_digit_group = 0;
-                let mut last_dc = '\0';
+                //let mut last_dc = '\0';
 
                 let s = match sign.is_some() {
                     true => &src[1..],
@@ -165,7 +185,7 @@ impl<'s> NumberChecker<'s> {
                                 _ => unreachable!(),
                             }
                             digits = 0;
-                            last_dc = c;
+                            //last_dc = c;
                         }
                         _ => return None,
                     }
@@ -228,10 +248,18 @@ impl<'s> NumberChecker<'s> {
                                 // unknown: X,XXX  XX,XXX  XXX,XXX
                                 // maybe en/ru
 
-                                // english notation
-                                coma_prop = Some(Coma::Thousand);
-                                let s = s.replace(',', "");
-                                NumberCheckerInner::int(&s, src)
+                                match unknown {
+                                    NumberNotation::Ru => {
+                                        coma_prop = Some(Coma::Fraction);
+                                        let s = s.replace(',', ".");
+                                        NumberCheckerInner::float(&s, src)
+                                    }
+                                    NumberNotation::En => {
+                                        coma_prop = Some(Coma::Thousand);
+                                        let s = s.replace(',', "");
+                                        NumberCheckerInner::int(&s, src)
+                                    }
+                                }
                             }
                             (_, _) => {
                                 // russian notation coma is a period
@@ -248,10 +276,17 @@ impl<'s> NumberChecker<'s> {
                                 // unknown: X.XXX  XX.XXX  XXX.XXX
                                 // maybe en/ru
 
-                                // russian notation
-                                coma_prop = Some(Coma::Fraction);
-                                let s = s.replace('.', "");
-                                NumberCheckerInner::int(&s, src)
+                                match unknown {
+                                    NumberNotation::Ru => {
+                                        coma_prop = Some(Coma::Fraction);
+                                        let s = s.replace('.', "");
+                                        NumberCheckerInner::int(&s, src)
+                                    }
+                                    NumberNotation::En => {
+                                        coma_prop = Some(Coma::Thousand);
+                                        NumberCheckerInner::float(&s, src)
+                                    }
+                                }
                             }
                             (_, _) => {
                                 // english notation dot is a period
@@ -262,23 +297,21 @@ impl<'s> NumberChecker<'s> {
                     }
                     (1, 1) => {
                         // one dot and one coma
-                        // for now: last is a period
+                        // for now: depends on unknown notation arg
                         // maybe en/ru
-                        match last_dc {
-                            ',' => {
-                                // XXX.XXX,XXX
+
+                        match unknown {
+                            NumberNotation::Ru => {
                                 coma_prop = Some(Coma::Fraction);
                                 let s = s.replace('.', "");
                                 let s = s.replace(',', ".");
                                 NumberCheckerInner::float(&s, src)
                             }
-                            '.' => {
-                                // XXX,XXX.XXX
+                            NumberNotation::En => {
                                 coma_prop = Some(Coma::Thousand);
                                 let s = s.replace(',', "");
                                 NumberCheckerInner::float(&s, src)
                             }
-                            _ => unreachable!(), // safe: coma_count + dot_count > 0, last_dc != '\0'
                         }
                     }
                     (_, 0) => {
