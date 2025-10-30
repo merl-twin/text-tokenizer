@@ -82,6 +82,11 @@ impl<S: SentenceBreaker> TokenizerParams<S> {
             sentence_breaker: sb,
         }
     }
+
+    pub fn push_option(&mut self, option: TokenizerOptions) {
+        self.options.insert(option);
+    }
+
     pub fn options(&self) -> &BTreeSet<TokenizerOptions> {
         &self.options
     }
