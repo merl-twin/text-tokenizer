@@ -60,6 +60,25 @@ fn test_ru_01() {
         "2 октября: 20.000 рублей, с 3 октября - 22.000 рублей, в день семинара - 25.000 рублей.";
 
     let mut checker = WordChecker::new(&[
+        ("20.000", Token2::Word(Word::Number(Number::Integer(20)))),
+        ("22.000", Token2::Word(Word::Number(Number::Integer(22)))),
+        ("25.000", Token2::Word(Word::Number(Number::Integer(25)))),
+    ]);
+
+    let text = Text::try_from(txt).unwrap();
+    for tok in text.into_tokenizer(TokenizerParams::v1()) {
+        println!("[ {} ] {:?}", text.token_text(&tok), tok);
+        checker.check(&text, &tok);
+    }
+    checker.check_count();
+}
+
+#[test]
+fn test_ru_01_unk() {
+    let txt =
+        "2 октября: 20.000 рублей, с 3 октября - 22.000 рублей, в день семинара - 25.000 рублей.";
+
+    let mut checker = WordChecker::new(&[
         (
             "20.000",
             Token2::Word(Word::Number(Number::Integer(20_000))),
@@ -75,7 +94,9 @@ fn test_ru_01() {
     ]);
 
     let text = Text::try_from(txt).unwrap();
-    for tok in text.into_tokenizer(TokenizerParams::v1()) {
+    for tok in text
+        .into_tokenizer(TokenizerParams::v1().add_option(TokenizerOptions::NumberDefaultRuNotation))
+    {
         println!("[ {} ] {:?}", text.token_text(&tok), tok);
         checker.check(&text, &tok);
     }
@@ -149,7 +170,7 @@ fn custom_numbers_ftoi() {
 #[rustfmt::skip]
 fn custom_numbers_en_1() {
     let txt = "1.1 10,000";
-    
+
     let mut checker = WordChecker::new(&[
         ("1.1", Token2::Word(Word::Number(Number::Float(1.1)))),
         ("10,000", Token2::Word(Word::Number(Number::Integer(10000)))),
@@ -188,11 +209,11 @@ fn custom_numbers_ru_1() {
 
     let mut checker = WordChecker::new(&[
         ("1.1", Token2::Word(Word::Number(Number::Float(1.1)))),
-        ("10,001", Token2::Word(Word::Number(Number::Integer(10001)))),
+        ("10,001", Token2::Word(Word::Number(Number::Float(10.001)))),
     ]);
     
     let text = Text::try_from(txt).unwrap();
-    for tok in text.into_tokenizer(TokenizerParams::v1().add_option(TokenizerOptions::NumberUnknownComaAsDot)) {
+    for tok in text.into_tokenizer(TokenizerParams::v1().add_option(TokenizerOptions::NumberDefaultRuNotation)) {
         println!("[ {} ] {:?}", text.token_text(&tok), tok);
         checker.check(&text, &tok);
     }
