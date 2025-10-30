@@ -8,6 +8,8 @@ mod breakers;
 pub use breakers::{SentenceBreaker, UnicodeSentenceBreaker};
 
 mod numbers;
+pub use numbers::NumberNotation;
+
 mod wordbreaker;
 
 mod options;

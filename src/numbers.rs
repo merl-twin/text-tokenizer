@@ -23,6 +23,12 @@ impl NumberNotation {
             (false, true) => NumberNotation::Ru,
         }
     }
+    pub fn into_option(&self) -> TokenizerOptions {
+        match self {
+            NumberNotation::En => TokenizerOptions::NumberDefaultEnNotation,
+            NumberNotation::Ru => TokenizerOptions::NumberDefaultRuNotation,
+        }
+    }
 }
 
 pub struct NumberCounter {
