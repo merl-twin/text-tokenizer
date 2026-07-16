@@ -81,6 +81,24 @@ impl Ord for Number {
 }
 impl Eq for Number {}
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Default)]
+pub struct NewlineProperties {
+    is_win: bool,
+}
+impl NewlineProperties {
+    // use default()
+    /*pub fn new() -> NewlineProperties {
+        NewlineProperties { is_win: false }
+    }*/
+    pub fn set_win(mut self) -> NewlineProperties {
+        self.is_win = true;
+        self
+    }
+    pub fn is_win(&self) -> bool {
+        self.is_win
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Formatter {
     Char(char),
@@ -91,8 +109,7 @@ pub enum Formatter {
 pub enum Separator {
     Space,
     Tab,
-    Newline,
-    NewlineWin,
+    Newline(NewlineProperties),
     Char(char),
     MultiChar,
 }
@@ -910,13 +927,13 @@ mod test_strings {
         let uws = "1\n2\r3\r\n4\n\r5";
         let result = vec![
             PositionalToken { source: uws, offset: 0, length: 1, token: Token::Word(Word::Number(Number::Integer(1))) },            
-            PositionalToken { source: uws, offset: 1, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 1, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { source: uws, offset: 2, length: 1, token: Token::Word(Word::Number(Number::Integer(2))) },
             PositionalToken { source: uws, offset: 3, length: 1, token: Token::Special(Special::Separator(Separator::Char('\r'))) },
             PositionalToken { source: uws, offset: 4, length: 1, token: Token::Word(Word::Number(Number::Integer(3))) },            
-            PositionalToken { source: uws, offset: 5, length: 2, token: Token::Special(Special::Separator(Separator::NewlineWin)) },           
+            PositionalToken { source: uws, offset: 5, length: 2, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default().set_win()))) },           
             PositionalToken { source: uws, offset: 7, length: 1, token: Token::Word(Word::Number(Number::Integer(4))) },
-            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 8, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { source: uws, offset: 9, length: 1, token: Token::Special(Special::Separator(Separator::Char('\r'))) },
             PositionalToken { source: uws, offset: 10, length: 1, token: Token::Word(Word::Number(Number::Integer(5))) },
         ];
@@ -1169,7 +1186,9 @@ mod test_strings {
                 source: uws,
                 offset: 6,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -1732,7 +1751,9 @@ mod test_strings {
                 byte_length: 3,
                 char_offset: 109,
                 char_length: 3,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             CharToken {
                 byte_offset: 112,
@@ -1802,7 +1823,9 @@ mod test_strings {
                 byte_length: 1,
                 char_offset: 129,
                 char_length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             CharToken {
                 byte_offset: 131,
@@ -1942,7 +1965,9 @@ mod test_strings {
                 byte_length: 1,
                 char_offset: 201,
                 char_length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             CharToken {
                 byte_offset: 257,
@@ -1970,7 +1995,9 @@ mod test_strings {
                 byte_length: 1,
                 char_offset: 207,
                 char_length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             CharToken {
                 byte_offset: 275,
@@ -1998,7 +2025,9 @@ mod test_strings {
                 byte_length: 1,
                 char_offset: 214,
                 char_length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             CharToken {
                 byte_offset: 300,
@@ -2281,7 +2310,9 @@ mod test_strings {
                 source: uws,
                 offset: 77,
                 length: 3,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -2341,7 +2372,9 @@ mod test_strings {
                 source: uws,
                 offset: 98,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -2473,7 +2506,9 @@ mod test_strings {
                 source: uws,
                 offset: 224,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
         ];
         let lib_res = uws
@@ -2700,19 +2735,25 @@ mod test_strings {
                 source: uws,
                 offset: 77,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
                 offset: 78,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
                 offset: 79,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -2772,7 +2813,9 @@ mod test_strings {
                 source: uws,
                 offset: 98,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -2910,7 +2953,9 @@ mod test_strings {
                 source: uws,
                 offset: 224,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
         ];
         let lib_res = uws.into_tokenizer(Default::default()).collect::<Vec<_>>();
@@ -3129,7 +3174,9 @@ mod test_strings {
                 source: uws,
                 offset: 77,
                 length: 3,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3189,7 +3236,9 @@ mod test_strings {
                 source: uws,
                 offset: 98,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3309,7 +3358,9 @@ mod test_strings {
                 source: uws,
                 offset: 224,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
         ];
         let lib_res = uws
@@ -3463,7 +3514,9 @@ mod test_strings {
                 source: uws,
                 offset: 17,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3487,7 +3540,9 @@ mod test_strings {
                 source: uws,
                 offset: 42,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3499,7 +3554,9 @@ mod test_strings {
                 source: uws,
                 offset: 47,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3553,7 +3610,9 @@ mod test_strings {
                 source: uws,
                 offset: 60,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3565,7 +3624,9 @@ mod test_strings {
                 source: uws,
                 offset: 86,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3577,7 +3638,9 @@ mod test_strings {
                 source: uws,
                 offset: 91,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
         ];
 
@@ -3614,7 +3677,9 @@ mod test_strings {
                 source: uws,
                 offset: 17,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3638,7 +3703,9 @@ mod test_strings {
                 source: uws,
                 offset: 42,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3650,7 +3717,9 @@ mod test_strings {
                 source: uws,
                 offset: 47,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3668,7 +3737,9 @@ mod test_strings {
                 source: uws,
                 offset: 60,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3680,7 +3751,9 @@ mod test_strings {
                 source: uws,
                 offset: 86,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -3692,7 +3765,9 @@ mod test_strings {
                 source: uws,
                 offset: 91,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
         ];
 
@@ -3705,7 +3780,7 @@ mod test_strings {
     fn hashtags_mentions_urls() {
         let uws = "\nSome ##text with #hashtags and @other components\nadfa wdsfdf asdf asd http://asdfasdfsd.com/fasdfd/sadfsadf/sdfas/12312_12414/asdf?fascvx=fsfwer&dsdfasdf=fasdf#fasdf asdfa sdfa sdf\nasdfas df asd who@bla-bla.com asdfas df asdfsd\n";
         let result = vec![
-            PositionalToken { source: uws, offset: 0, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 0, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { source: uws, offset: 1, length: 4, token: Token::Word(Word::Word("Some".to_string())) },
             PositionalToken { source: uws, offset: 5, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { source: uws, offset: 6, length: 2, token: Token::Special(Special::Punctuation("##".to_string())) },
@@ -3720,7 +3795,7 @@ mod test_strings {
             PositionalToken { source: uws, offset: 32, length: 6, token: Token::Struct(Struct::Mention("other".to_string())) },
             PositionalToken { source: uws, offset: 38, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { source: uws, offset: 39, length: 10, token: Token::Word(Word::Word("components".to_string())) },
-            PositionalToken { source: uws, offset: 49, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 49, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { source: uws, offset: 50, length: 4, token: Token::Word(Word::Word("adfa".to_string())) },
             PositionalToken { source: uws, offset: 54, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { source: uws, offset: 55, length: 6, token: Token::Word(Word::Word("wdsfdf".to_string())) },
@@ -3736,7 +3811,7 @@ mod test_strings {
             PositionalToken { source: uws, offset: 173, length: 4, token: Token::Word(Word::Word("sdfa".to_string())) },
             PositionalToken { source: uws, offset: 177, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { source: uws, offset: 178, length: 3, token: Token::Word(Word::Word("sdf".to_string())) },
-            PositionalToken { source: uws, offset: 181, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 181, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { source: uws, offset: 182, length: 6, token: Token::Word(Word::Word("asdfas".to_string())) },
             PositionalToken { source: uws, offset: 188, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { source: uws, offset: 189, length: 2, token: Token::Word(Word::Word("df".to_string())) },
@@ -3753,7 +3828,7 @@ mod test_strings {
             PositionalToken { source: uws, offset: 219, length: 2, token: Token::Word(Word::Word("df".to_string())) },
             PositionalToken { source: uws, offset: 221, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { source: uws, offset: 222, length: 6, token: Token::Word(Word::Word("asdfsd".to_string())) },
-            PositionalToken { source: uws, offset: 228, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { source: uws, offset: 228, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             ];
         let lib_res = uws.into_tokenizer(TokenizerParams::complex()).collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);
@@ -3783,15 +3858,15 @@ mod test_strings {
                 ] } },
             PositionalToken { offset: 73, length: 1, token: Token::Special(Special::Punctuation('.')) },
             PositionalToken { offset: 74, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { offset: 75, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 75, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { offset: 76, length: 6, token: Token::Word(Word::Word("Andrew".to_string())) },
-            PositionalToken { offset: 82, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 82, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { offset: 83, length: 70, token: Token::BBCode { left: vec![
                 PositionalToken { offset: 84, length: 4, token: Token::Word(Word::Word("link".to_string())) },
                 ], right: vec![
                 PositionalToken { offset: 89, length: 63, token: Token::Struct(Struct::Url("https://www.facebook.com/100001150683379/posts/1873048549410150".to_string())) },
                 ] } },
-            PositionalToken { offset: 153, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 153, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { offset: 154, length: 12, token: Token::Word(Word::Word("Друзья".to_string())) },
             PositionalToken { offset: 166, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { offset: 167, length: 6, token: Token::Word(Word::Word("мои".to_string())) },
@@ -3829,7 +3904,7 @@ mod test_strings {
             PositionalToken { offset: 347, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { offset: 348, length: 14, token: Token::Word(Word::Word("консёрн".to_string())) },
             PositionalToken { offset: 362, length: 1, token: Token::Special(Special::Punctuation('.')) },
-            PositionalToken { offset: 363, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 363, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { offset: 364, length: 4, token: Token::Word(Word::Word("На".to_string())) },
             PositionalToken { offset: 368, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { offset: 369, length: 14, token: Token::Word(Word::Word("текущий".to_string())) },
@@ -3869,7 +3944,7 @@ mod test_strings {
             PositionalToken { offset: 556, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { offset: 557, length: 16, token: Token::Word(Word::Word("кипятком".to_string())) },
             PositionalToken { offset: 573, length: 1, token: Token::Special(Special::Punctuation('.')) },
-            PositionalToken { offset: 574, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 574, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { offset: 575, length: 10, token: Token::Word(Word::Word("Врачи".to_string())) },
             PositionalToken { offset: 585, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { offset: 586, length: 14, token: Token::Word(Word::Word("обещают".to_string())) },
@@ -3914,7 +3989,7 @@ mod test_strings {
             PositionalToken { offset: 851, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
             PositionalToken { offset: 852, length: 10, token: Token::Word(Word::Word("жизни".to_string())) },
             PositionalToken { offset: 862, length: 1, token: Token::Special(Special::Punctuation('.')) },
-            PositionalToken { offset: 863, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 863, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { offset: 864, length: 3, token: Token::BBCode { left: vec![
                 ], right: vec![
                 ] } },
@@ -4382,7 +4457,9 @@ mod test_strings {
                 source: uws,
                 offset: 794,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -4394,7 +4471,9 @@ mod test_strings {
                 source: uws,
                 offset: 870,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -4412,7 +4491,9 @@ mod test_strings {
                 source: uws,
                 offset: 919,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -5030,7 +5111,9 @@ mod test_strings {
                 source: uws,
                 offset: 1664,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -5042,7 +5125,9 @@ mod test_strings {
                 source: uws,
                 offset: 1725,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -5054,7 +5139,9 @@ mod test_strings {
                 source: uws,
                 offset: 2725,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -5066,7 +5153,9 @@ mod test_strings {
                 source: uws,
                 offset: 2888,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -5078,13 +5167,17 @@ mod test_strings {
                 source: uws,
                 offset: 2891,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
                 offset: 2904,
                 length: 1,
-                token: Token::Special(Special::Separator(Separator::Newline)),
+                token: Token::Special(Special::Separator(Separator::Newline(
+                    NewlineProperties::default(),
+                ))),
             },
             PositionalToken {
                 source: uws,
@@ -5128,7 +5221,7 @@ mod test_strings {
                 PositionalToken { offset: 37, length: 14, token: Token::Word(Word::Word("девушек".to_string())) },
                 ] } },
             PositionalToken { offset: 52, length: 1, token: Token::Special(Special::Separator(Separator::Space)) },
-            PositionalToken { offset: 53, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 53, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             PositionalToken { offset: 54, length: 58, token: Token::BBCode { left: vec![
                 PositionalToken { offset: 55, length: 13, token: Token::Word(Word::Numerical(Numerical::Alphanumeric("club113623432".to_string()))) },
                 ], right: vec![
@@ -5153,7 +5246,7 @@ mod test_strings {
         let uws = "https://youtu.be/dQErLQZw3qA</a></p><figure data-type=\"102\" data-mode=\"\"  class=\"article_decoration_first article_decoration_last\" >\n";
         let result =  vec![
             PositionalToken { offset: 0, length: 28, token: Token::Struct(Struct::Url("https://youtu.be/dQErLQZw3qA".to_string())) },
-            PositionalToken { offset: 132, length: 1, token: Token::Special(Special::Separator(Separator::Newline)) },
+            PositionalToken { offset: 132, length: 1, token: Token::Special(Special::Separator(Separator::Newline(NewlineProperties::default()))) },
             ];
         let lib_res = uws.into_tokenizer(TokenizerParams::v1()).unwrap().collect::<Vec<_>>();
         check_results(&result,&lib_res,uws);

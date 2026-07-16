@@ -4,8 +4,8 @@ use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCa
 use text_parsing::Local;
 
 use crate::{
-    EMOJIMAP, Formatter, IntoTokenizer, Numerical, SentenceBreaker, Separator, Special, Struct,
-    Token, TokenizerOptions, TokenizerParams, Unicode, Word,
+    EMOJIMAP, Formatter, IntoTokenizer, NewlineProperties, Numerical, SentenceBreaker, Separator,
+    Special, Struct, Token, TokenizerOptions, TokenizerParams, Unicode, Word,
     numbers::NumberChecker,
     wordbreaker::{BasicToken, WordBreaker, one_char_word},
 };
@@ -69,14 +69,14 @@ impl<'t> Tokens<'t> {
     fn basic_separator_to_pt(&mut self, c: char) -> Token {
         Token::Special(Special::Separator(match c {
             ' ' => Separator::Space,
-            '\n' => Separator::Newline,
+            '\n' => Separator::Newline(NewlineProperties::default()),
             '\t' => Separator::Tab,
             _ => Separator::Char(c),
         }))
     }
     fn basic_multy_separator_to_pt(&mut self, s: &str) -> Token {
         Token::Special(Special::Separator(match s {
-            "\r\n" => Separator::NewlineWin,
+            "\r\n" => Separator::Newline(NewlineProperties::default().set_win()),
             _ => {
                 //#[cfg(feature = "strings")]
                 //{
