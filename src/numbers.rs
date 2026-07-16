@@ -141,7 +141,7 @@ impl<'s> NumberChecker<'s> {
         src: &str,
         unknown: NumberNotation,
         _unknown_by_stat: Option<Coma>,
-    ) -> Option<NumberChecker> {
+    ) -> Option<NumberChecker<'_>> {
         let mut coma_prop = None;
         let (zero, sign) = match src.chars().next() {
             Some('0') => (true, None),

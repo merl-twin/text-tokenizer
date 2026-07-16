@@ -19,6 +19,7 @@ pub enum BasicToken<'t> {
     Punctuation(char),
     CurrencySymbol(char),
     Separator(char),
+    MultiSeparator(&'t str),
     Formatter(char),
     Mixed(&'t str),
 }
@@ -201,6 +202,7 @@ impl<'t> WordBreaker<'t> {
         match self.bounds.next() {
             Some((w, extra)) => {
                 let (local, w) = w.into_inner();
+                //println!("Bounds: {:?} {:?}", w, local);
                 if let Some(c) = one_char_word(w) {
                     if ((c == '+') || (c == '-'))
                         && self.prev_is_separator
@@ -279,7 +281,8 @@ impl<'t> WordBreaker<'t> {
                     return Some(local.local(BasicToken::Number(w, num)));
                 }
 
-                let mut an = true;
+                let mut an = true; // alphanumeric
+                let mut ws = true; // whitespace
                 for c in w.chars() {
                     an = an
                         && (c.is_alphanumeric()
@@ -288,10 +291,16 @@ impl<'t> WordBreaker<'t> {
                             || (c == '-')
                             || (c == '+')
                             || (c == '_'));
+                    ws = ws && c.is_whitespace();
                 }
                 if an {
                     return Some(local.local(BasicToken::Alphanumeric(w)));
                 }
+                if ws {
+                    return Some(local.local(BasicToken::MultiSeparator(w)));
+                }
+
+                // Unknown non-specific case
                 Some(local.local(BasicToken::Mixed(w)))
             }
             None => None,
@@ -302,9 +311,10 @@ impl<'t> Iterator for WordBreaker<'t> {
     type Item = Local<BasicToken<'t>>;
     fn next(&mut self) -> Option<Self::Item> {
         let tok = self.next_token();
+        //println!("Basic: {:?}", tok);
         self.prev_is_separator = match &tok {
             Some(tok) => match tok.data() {
-                BasicToken::Separator(..) => true,
+                BasicToken::Separator(..) | BasicToken::MultiSeparator(..) => true,
                 _ => false,
             },
             _ => false,

@@ -74,6 +74,19 @@ impl<'t> Tokens<'t> {
             _ => Separator::Char(c),
         }))
     }
+    fn basic_multy_separator_to_pt(&mut self, s: &str) -> Token {
+        Token::Special(Special::Separator(match s {
+            "\r\n" => Separator::NewlineWin,
+            _ => {
+                //#[cfg(feature = "strings")]
+                //{
+                //    Separator::MultiChar(s.to_string())
+                //}
+                //#[cfg(not(feature = "strings"))]
+                Separator::MultiChar
+            }
+        }))
+    }
     fn basic_formater_to_pt(&mut self, c: char) -> Token {
         Token::Unicode(Unicode::Formatter(match c {
             '\u{200d}' => Formatter::Joiner,
@@ -394,6 +407,7 @@ impl<'t> Tokens<'t> {
                         BasicToken::Punctuation(..)
                         | BasicToken::CurrencySymbol(..)
                         | BasicToken::Separator(..)
+                        | BasicToken::MultiSeparator(..)
                         | BasicToken::Formatter(..)
                         | BasicToken::Mixed(..) => break,
                     }
@@ -464,6 +478,7 @@ impl<'t> Tokens<'t> {
                         BasicToken::Punctuation(..)
                         | BasicToken::CurrencySymbol(..)
                         | BasicToken::Separator(..)
+                        | BasicToken::MultiSeparator(..)
                         | BasicToken::Formatter(..)
                         | BasicToken::Mixed(..) => break,
                     }
@@ -508,6 +523,7 @@ impl<'t> Tokens<'t> {
                     BasicToken::CurrencySymbol(s) => self.basic_currency_to_pt(s),
                     BasicToken::Mixed(s) => self.basic_mixed_to_pt(s),
                     BasicToken::Separator(s) => self.basic_separator_to_pt(s),
+                    BasicToken::MultiSeparator(s) => self.basic_multy_separator_to_pt(s),
                     BasicToken::Formatter(s) => self.basic_formater_to_pt(s),
                 }))
             }
